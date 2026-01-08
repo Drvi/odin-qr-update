@@ -78,9 +78,15 @@ delcols :: proc(m: int, n: int, k: int, p: int, r: []f64, ldr: int, work: []f64)
     // subdiagonal element at position (j+1, j) using a rotation that
     // mixes rows j and j+1.
 
-    for j in k ..< min(new_n - 1, m - 1) {
+    // Apply Givens rotations to restore upper triangular form.
+    // After shifting, elements that were on the diagonal of the deleted portion
+    // end up below the diagonal and need to be eliminated.
+    // We iterate over columns k to min(new_n-1, m-2) and eliminate element (j+1, j).
+    for j in k ..< min(new_n, m - 1) {
         // Zero out element (j+1, j) using a rotation of rows j and j+1
-        // from columns j to new_n-1
+        if j + 1 >= m {
+            continue
+        }
 
         if r[(j + 1) * ldr + j] == 0.0 {
             continue
@@ -93,7 +99,6 @@ delcols :: proc(m: int, n: int, k: int, p: int, r: []f64, ldr: int, work: []f64)
 
         // Apply rotation to remaining columns j+1 to new_n-1 of rows j and j+1
         if j + 1 < new_n {
-            // Get slices for rows j and j+1, starting from column j+1
             row_j_start := j * ldr + (j + 1)
             row_j1_start := (j + 1) * ldr + (j + 1)
             num_cols := new_n - (j + 1)
@@ -150,8 +155,11 @@ delcolsq :: proc(m: int, n: int, k: int, p: int, q: []f64, ldq: int, r: []f64, l
     // Apply Givens rotations to restore upper triangular form
     // Also accumulate the rotations in Q
 
-    for j in k ..< min(new_n - 1, m - 1) {
+    for j in k ..< min(new_n, m - 1) {
         // Zero out element (j+1, j) using a rotation of rows j and j+1
+        if j + 1 >= m {
+            continue
+        }
 
         if r[(j + 1) * ldr + j] == 0.0 {
             continue
