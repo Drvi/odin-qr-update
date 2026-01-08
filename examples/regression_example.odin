@@ -237,8 +237,8 @@ main :: proc() {
     defer delete(q)
     blas.dorgqr(M, N, a_qr, lda, tau, q, M, work)
 
-    // Extract R
-    r := make([]f64, M * lda)
+    // Extract R (allocate extra space for addrows test later)
+    r := make([]f64, (M + 5) * lda)
     defer delete(r)
     blas.extract_r(M, N, a_qr, lda, r, lda)
 
