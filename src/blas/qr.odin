@@ -37,14 +37,14 @@ dgeqrf :: proc(m: int, n: int, a: []f64, lda: int, tau: []f64, work: []f64) {
             for j in i + 1 ..< m {
                 xnorm += a[j * lda + i] * a[j * lda + i]
             }
-            xnorm = math.sqrt(xnorm)
+            xnorm = math.sqrt_f64(xnorm)
 
             if xnorm == 0.0 && alpha >= 0.0 {
                 tau[i] = 0.0
             } else {
                 // beta = -sign(alpha) * ||[alpha; x]||
-                norm_full := math.sqrt(alpha * alpha + xnorm * xnorm)
-                beta := -math.copy_sign(norm_full, alpha)
+                norm_full := math.sqrt_f64(alpha * alpha + xnorm * xnorm)
+                beta := -math.copy_sign_f64(norm_full, alpha)
 
                 // tau = (beta - alpha) / beta
                 tau[i] = (beta - alpha) / beta

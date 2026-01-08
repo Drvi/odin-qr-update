@@ -32,7 +32,7 @@ frobenius_norm :: proc(a: []f64, m, n, lda: int) -> f64 {
             sum += a[i * lda + j] * a[i * lda + j]
         }
     }
-    return math.sqrt(sum)
+    return math.sqrt_f64(sum)
 }
 
 // Helper to print a matrix
@@ -146,8 +146,8 @@ test_drot :: proc() -> bool {
     fmt.println("Testing drot...")
 
     // Test with a 45-degree rotation (c = s = 1/sqrt(2))
-    c := 1.0 / math.sqrt(2.0)
-    s := 1.0 / math.sqrt(2.0)
+    c := 1.0 / math.sqrt_f64(2.0)
+    s := 1.0 / math.sqrt_f64(2.0)
 
     x := []f64{1.0, 0.0}
     y := []f64{0.0, 1.0}

@@ -199,10 +199,10 @@ dnrm2 :: proc(n: int, x: []f64, incx: int) -> f64 {
     // ssml = RADIX ^ (-floor((minexponent - digits) * 0.5))
     // sbig = RADIX ^ (-ceiling((maxexponent + digits - 1) * 0.5))
 
-    tsml := math.pow(RADIX, f64((-MIN_EXP - 1 + 1) / 2))  // ~1.49e-154
-    tbig := math.pow(RADIX, f64((MAX_EXP - DIGITS + 1) / 2))  // ~1.99e+146
-    ssml := math.pow(RADIX, f64(-(-MIN_EXP - DIGITS) / 2))  // ~4.47e+161
-    sbig := math.pow(RADIX, f64(-(MAX_EXP + DIGITS - 1 + 1) / 2))  // ~1.12e-162
+    tsml := math.pow_f64(RADIX, f64((-MIN_EXP - 1 + 1) / 2))  // ~1.49e-154
+    tbig := math.pow_f64(RADIX, f64((MAX_EXP - DIGITS + 1) / 2))  // ~1.99e+146
+    ssml := math.pow_f64(RADIX, f64(-(-MIN_EXP - DIGITS) / 2))  // ~4.47e+161
+    sbig := math.pow_f64(RADIX, f64(-(MAX_EXP + DIGITS - 1 + 1) / 2))  // ~1.12e-162
 
     // Compute the sum of squares in 3 accumulators:
     // abig -- sums of squares scaled down to avoid overflow
@@ -248,8 +248,8 @@ dnrm2 :: proc(n: int, x: []f64, incx: int) -> f64 {
     } else if asml > ZERO {
         // Combine amed and asml if asml > 0
         if amed > ZERO || amed != amed {
-            amed_sqrt := math.sqrt(amed)
-            asml_sqrt := math.sqrt(asml) / ssml
+            amed_sqrt := math.sqrt_f64(amed)
+            asml_sqrt := math.sqrt_f64(asml) / ssml
             ymin, ymax: f64
             if asml_sqrt > amed_sqrt {
                 ymin = amed_sqrt
@@ -270,7 +270,7 @@ dnrm2 :: proc(n: int, x: []f64, incx: int) -> f64 {
         sumsq = amed
     }
 
-    return scl * math.sqrt(sumsq)
+    return scl * math.sqrt_f64(sumsq)
 }
 
 // drot applies a plane rotation.

@@ -33,8 +33,8 @@ dlartg :: proc(f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
     HALF :: 0.5
 
     // Compute safe min/max for scaling
-    rtmin := math.sqrt(SAFMIN)
-    rtmax := math.sqrt(SAFMAX / 2.0)
+    rtmin := math.sqrt_f64(SAFMIN)
+    rtmax := math.sqrt_f64(SAFMAX / 2.0)
 
     f1 := abs(f)
     g1 := abs(g)
@@ -49,7 +49,7 @@ dlartg :: proc(f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
         r = g1
     } else if f1 > rtmin && f1 < rtmax && g1 > rtmin && g1 < rtmax {
         // Normal case: values are in safe range
-        d := math.sqrt(f * f + g * g)
+        d := math.sqrt_f64(f * f + g * g)
         c = f1 / d
         r = d if f >= ZERO else -d
         s = g / r
@@ -58,7 +58,7 @@ dlartg :: proc(f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
         u := min(SAFMAX, max(SAFMIN, f1, g1))
         fs := f / u
         gs := g / u
-        d := math.sqrt(fs * fs + gs * gs)
+        d := math.sqrt_f64(fs * fs + gs * gs)
         c = abs(fs) / d
         r = d if f >= ZERO else -d
         s = gs / r
@@ -98,7 +98,7 @@ drotg :: proc(a: f64, b: f64) -> (c: f64, s: f64, r: f64, z: f64) {
         r = 0.0
         z = 0.0
     } else {
-        r = scale * math.sqrt((a / scale) * (a / scale) + (b / scale) * (b / scale))
+        r = scale * math.sqrt_f64((a / scale) * (a / scale) + (b / scale) * (b / scale))
         if roe < 0.0 {
             r = -r
         }
@@ -137,9 +137,11 @@ drotg :: proc(a: f64, b: f64) -> (c: f64, s: f64, r: f64, z: f64) {
 // Returns:
 //   beta  - The value beta
 //   tau   - The value tau
-dlarfg :: proc(n: int, alpha: f64, x: []f64, incx: int) -> (beta: f64, tau: f64) {
+dlarfg :: proc(n: int, alpha_in: f64, x: []f64, incx: int) -> (beta: f64, tau: f64) {
     ZERO :: 0.0
     ONE :: 1.0
+
+    alpha := alpha_in  // Make a local mutable copy
 
     if n <= 1 {
         tau = ZERO
@@ -157,7 +159,7 @@ dlarfg :: proc(n: int, alpha: f64, x: []f64, incx: int) -> (beta: f64, tau: f64)
     }
 
     // General case
-    beta = -math.copy_sign(math.sqrt(alpha * alpha + xnorm * xnorm), alpha)
+    beta = -math.copy_sign_f64(math.sqrt_f64(alpha * alpha + xnorm * xnorm), alpha)
 
     // Scale if beta is too small
     safmin := SAFMIN / EPS
@@ -174,7 +176,7 @@ dlarfg :: proc(n: int, alpha: f64, x: []f64, incx: int) -> (beta: f64, tau: f64)
         }
         // New beta is at most 1, at least safmin
         xnorm = dnrm2(n - 1, x, incx)
-        beta = -math.copy_sign(math.sqrt(alpha * alpha + xnorm * xnorm), alpha)
+        beta = -math.copy_sign_f64(math.sqrt_f64(alpha * alpha + xnorm * xnorm), alpha)
     }
 
     tau = (beta - alpha) / beta
