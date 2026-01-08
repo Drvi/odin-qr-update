@@ -56,8 +56,10 @@ try
     end
 
     # Also verify using explicit QR
-    Q, R = qr(X_initial)
-    beta_qr = R \ (Q' * y_initial)
+    F = qr(X_initial)
+    n = size(X_initial, 2)
+    Qty = F.Q' * y_initial
+    beta_qr = F.R \ Qty[1:n]  # Only first n elements for least squares
     @printf("QR explicit max diff: %.2e\n", maximum(abs.(beta_odin - beta_qr)))
 
 catch e
