@@ -1,3 +1,20 @@
+> **Status: superseded for anything actually being built.**
+>
+> This document was written as a speculative API exploration, before the
+> repository adopted the operating rules in `context/data-oriented-design.md`.
+> Much of what it proposes is exactly what those rules reject: abstraction
+> layers and type parameters added for hypothetical future needs (layout-generic
+> matrix types, `f32`/complex support, expression templates, builder patterns,
+> GPU hooks), and performance claims with no measurement behind them.
+>
+> Work on the least-squares subsystem instead follows `docs/OLS_PLAN.md`
+> (plan, real data, costs, boundary policy) and `docs/OLS_RESULTS.md`
+> (measurements and what was not verified). Where the two disagree, those win.
+>
+> Kept for the record, and because a few of the observations about the existing
+> API still hold. Do not implement from it without re-deriving the need from
+> real data first.
+
 # Odin BLAS API Redesign
 
 ## Executive Summary

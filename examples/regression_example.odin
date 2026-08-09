@@ -34,7 +34,13 @@ rng_normal :: proc(r: ^RNG) -> f64 {
 }
 
 // Solve least squares problem using QR factorization: min ||Ax - b||
-// Returns coefficients x
+// Returns coefficients x.
+//
+// This wraps blas.ols_solve_dense, which applies the Householder reflectors
+// straight to b instead of materializing Q. The previous version of this
+// procedure built the full m x m Q via dorgqr and then did a second m x m pass
+// to form Q^T*b; that was 489 MiB and 28 s at m = 8000 against 0.37 ms here.
+// See docs/OLS_RESULTS.md.
 solve_ls_qr :: proc(
     m: int, n: int,
     a: []f64, lda: int,
@@ -42,7 +48,7 @@ solve_ls_qr :: proc(
     x: []f64,
     work: []f64,
 ) {
-    // Make copies since QR modifies input
+    // ols_solve_dense destroys both inputs, so hand it copies.
     a_copy := make([]f64, m * lda)
     defer delete(a_copy)
     for i in 0 ..< m * lda {
@@ -55,52 +61,21 @@ solve_ls_qr :: proc(
         b_copy[i] = b[i]
     }
 
-    tau := make([]f64, min(m, n))
-    defer delete(tau)
+    scratch := make([]f64, blas.ols_dense_scratch(n))
+    defer delete(scratch)
 
-    // Compute QR factorization
-    blas.dgeqrf(m, n, a_copy, lda, tau, work)
-
-    // Generate Q
-    q := make([]f64, m * m)
-    defer delete(q)
-    blas.dorgqr(m, n, a_copy, lda, tau, q, m, work)
-
-    // Extract R
-    r := make([]f64, m * n)
-    defer delete(r)
-    blas.extract_r(m, n, a_copy, lda, r, n)
-
-    // Compute Q^T * b
-    qtb := make([]f64, m)
-    defer delete(qtb)
-    for i in 0 ..< m {
-        sum: f64 = 0.0
-        for j in 0 ..< m {
-            sum += q[j * m + i] * b_copy[j]
+    _, err := blas.ols_solve_dense(m, n, a_copy, lda, b_copy, x, scratch)
+    if err != .None {
+        fmt.printf("solve_ls_qr: %v\n", err)
+        for i in 0 ..< n {
+            x[i] = 0.0
         }
-        qtb[i] = sum
     }
-
-    // Solve R * x = Q^T * b (only first n equations, back substitution)
-    for i in 0 ..< n {
-        x[i] = qtb[i]
-    }
-    blas.dtrsv(.Upper, .No_Trans, .Non_Unit, n, r, n, x, 1)
 }
 
 // Compute residual norm ||Ax - b||
 residual_norm :: proc(m: int, n: int, a: []f64, lda: int, x: []f64, b: []f64) -> f64 {
-    sum: f64 = 0.0
-    for i in 0 ..< m {
-        ax: f64 = 0.0
-        for j in 0 ..< n {
-            ax += a[i * lda + j] * x[j]
-        }
-        diff := ax - b[i]
-        sum += diff * diff
-    }
-    return math.sqrt_f64(sum)
+    return blas.ols_residual_norm(m, n, a, lda, x, b)
 }
 
 // Compare two coefficient vectors
@@ -128,7 +103,9 @@ write_matrix :: proc(filename: string, a: []f64, m: int, n: int, lda: int) {
         strings.write_string(&sb, "\n")
     }
 
-    os.write_entire_file(filename, transmute([]u8)strings.to_string(sb))
+    if err := os.write_entire_file(filename, transmute([]u8)strings.to_string(sb)); err != nil {
+        fmt.printf("failed to write %s: %v\n", filename, err)
+    }
 }
 
 // Write vector to file
@@ -140,7 +117,9 @@ write_vector :: proc(filename: string, v: []f64, n: int) {
         strings.write_string(&sb, fmt.tprintf("%.15e\n", v[i]))
     }
 
-    os.write_entire_file(filename, transmute([]u8)strings.to_string(sb))
+    if err := os.write_entire_file(filename, transmute([]u8)strings.to_string(sb)); err != nil {
+        fmt.printf("failed to write %s: %v\n", filename, err)
+    }
 }
 
 main :: proc() {

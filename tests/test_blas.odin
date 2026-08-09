@@ -506,6 +506,11 @@ test_qr_update_consistency :: proc() -> bool {
 // Main test runner
 // ============================================================================
 
+Test :: struct {
+    name: string,
+    fn:   proc() -> bool,
+}
+
 main :: proc() {
     fmt.println("=== BLAS Library Tests ===\n")
 
@@ -590,6 +595,28 @@ main :: proc() {
         passed += 1
     } else {
         failed += 1
+    }
+
+    // Numerical regression tests (see docs/OLS_RESULTS.md)
+    fmt.println("\n--- Numerical robustness ---")
+    for t in ([]Test {
+        {"dnrm2 scaling", test_dnrm2_scaling},
+        {"row-major lda checks", test_row_major_lda_checks},
+        {"dgeqrf extreme scale", test_dgeqrf_extreme_scale},
+    }) {
+        if t.fn() {passed += 1} else {failed += 1}
+    }
+
+    // Least squares (docs/OLS_PLAN.md section 6)
+    fmt.println("\n--- Least squares ---")
+    for t in ([]Test {
+        {"dense ground truth", test_ols_dense_ground_truth},
+        {"accumulator ground truth", test_ols_accum_ground_truth},
+        {"chunk invariance", test_ols_accum_chunk_invariance},
+        {"transforms agree", test_ols_transforms_agree},
+        {"boundary policies", test_ols_boundaries},
+    }) {
+        if t.fn() {passed += 1} else {failed += 1}
     }
 
     fmt.println("\n=== Summary ===")
