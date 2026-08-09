@@ -9,7 +9,7 @@ import "core:math"
 
 // dcopy copies a vector x to a vector y.
 // Translated from Reference BLAS dcopy.f
-dcopy :: proc(n: int, x: []f64, incx: int, y: []f64, incy: int) {
+dcopy :: proc "contextless" (n: int, x: []f64, incx: int, y: []f64, incy: int) {
     if n <= 0 {
         return
     }
@@ -54,7 +54,7 @@ dcopy :: proc(n: int, x: []f64, incx: int, y: []f64, incy: int) {
 
 // dscal scales a vector by a constant.
 // Translated from Reference BLAS dscal.f
-dscal :: proc(n: int, da: f64, x: []f64, incx: int) {
+dscal :: proc "contextless" (n: int, da: f64, x: []f64, incx: int) {
     if n <= 0 || incx <= 0 || da == 1.0 {
         return
     }
@@ -88,7 +88,7 @@ dscal :: proc(n: int, da: f64, x: []f64, incx: int) {
 
 // daxpy computes y := a*x + y
 // Translated from Reference BLAS daxpy.f
-daxpy :: proc(n: int, da: f64, x: []f64, incx: int, y: []f64, incy: int) {
+daxpy :: proc "contextless" (n: int, da: f64, x: []f64, incx: int, y: []f64, incy: int) {
     if n <= 0 {
         return
     }
@@ -133,7 +133,7 @@ daxpy :: proc(n: int, da: f64, x: []f64, incx: int, y: []f64, incy: int) {
 
 // ddot forms the dot product of two vectors.
 // Translated from Reference BLAS ddot.f
-ddot :: proc(n: int, x: []f64, incx: int, y: []f64, incy: int) -> f64 {
+ddot :: proc "contextless" (n: int, x: []f64, incx: int, y: []f64, incy: int) -> f64 {
     dtemp: f64 = 0.0
 
     if n <= 0 {
@@ -195,7 +195,7 @@ NRM2_SBIG :: 1.1113793747425387e-162 // 2^-538
 // dnrm2 computes the Euclidean norm of a vector.
 // Translated from Reference BLAS dnrm2.f90
 // Uses Blue's scaling algorithm for numerical stability
-dnrm2 :: proc(n: int, x: []f64, incx: int) -> f64 {
+dnrm2 :: proc "contextless" (n: int, x: []f64, incx: int) -> f64 {
     ZERO :: 0.0
     ONE :: 1.0
 
@@ -279,7 +279,7 @@ dnrm2 :: proc(n: int, x: []f64, incx: int) -> f64 {
 
 // drot applies a plane rotation.
 // Translated from Reference BLAS drot.f
-drot :: proc(n: int, x: []f64, incx: int, y: []f64, incy: int, c: f64, s: f64) {
+drot :: proc "contextless" (n: int, x: []f64, incx: int, y: []f64, incy: int, c: f64, s: f64) {
     if n <= 0 {
         return
     }
@@ -312,7 +312,7 @@ drot :: proc(n: int, x: []f64, incx: int, y: []f64, incy: int, c: f64, s: f64) {
 }
 
 // dasum computes the sum of absolute values.
-dasum :: proc(n: int, x: []f64, incx: int) -> f64 {
+dasum :: proc "contextless" (n: int, x: []f64, incx: int) -> f64 {
     if n <= 0 || incx <= 0 {
         return 0.0
     }
@@ -344,7 +344,7 @@ dasum :: proc(n: int, x: []f64, incx: int) -> f64 {
 
 // idamax finds the index of element having maximum absolute value.
 // Returns 0-based index (unlike Fortran which returns 1-based).
-idamax :: proc(n: int, x: []f64, incx: int) -> int {
+idamax :: proc "contextless" (n: int, x: []f64, incx: int) -> int {
     if n < 1 || incx <= 0 {
         return -1
     }
@@ -381,7 +381,7 @@ idamax :: proc(n: int, x: []f64, incx: int) -> int {
 }
 
 // dswap interchanges two vectors.
-dswap :: proc(n: int, x: []f64, incx: int, y: []f64, incy: int) {
+dswap :: proc "contextless" (n: int, x: []f64, incx: int, y: []f64, incy: int) {
     if n <= 0 {
         return
     }

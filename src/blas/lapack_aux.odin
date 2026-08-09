@@ -19,7 +19,7 @@ EPS :: 2.2204460492503131e-16      // Machine epsilon
 // Squaring the arguments directly overflows to Inf once |x| exceeds about
 // 1.3e154, which is well inside the range of values a well-scaled f64 problem
 // can legitimately contain.
-dlapy2 :: proc(x: f64, y: f64) -> f64 {
+dlapy2 :: proc "contextless" (x: f64, y: f64) -> f64 {
     xabs := abs(x)
     yabs := abs(y)
 
@@ -55,7 +55,7 @@ dlapy2 :: proc(x: f64, y: f64) -> f64 {
 //
 // The routine handles scaling to prevent overflow/underflow.
 // Translated from Reference LAPACK dlartg.f90 (February 2021)
-dlartg :: proc(f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
+dlartg :: proc "contextless" (f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
     ZERO :: 0.0
     ONE :: 1.0
     HALF :: 0.5
@@ -98,7 +98,7 @@ dlartg :: proc(f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
 
 // dlartgp generates a plane rotation so that the diagonal is nonnegative.
 // This is like dlartg but ensures r >= 0.
-dlartgp :: proc(f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
+dlartgp :: proc "contextless" (f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
     c, s, r = dlartg(f, g)
     if r < 0.0 {
         c = -c
@@ -113,7 +113,7 @@ dlartgp :: proc(f: f64, g: f64) -> (c: f64, s: f64, r: f64) {
 // Given (a, b), computes (c, s, r, z) such that:
 //    [  c  s ] [ a ]   [ r ]
 //    [ -s  c ] [ b ] = [ 0 ]
-drotg :: proc(a: f64, b: f64) -> (c: f64, s: f64, r: f64, z: f64) {
+drotg :: proc "contextless" (a: f64, b: f64) -> (c: f64, s: f64, r: f64, z: f64) {
     roe := b
     if abs(a) > abs(b) {
         roe = a
@@ -165,7 +165,7 @@ drotg :: proc(a: f64, b: f64) -> (c: f64, s: f64, r: f64, z: f64) {
 // Returns:
 //   beta  - The value beta
 //   tau   - The value tau
-dlarfg :: proc(n: int, alpha_in: f64, x: []f64, incx: int) -> (beta: f64, tau: f64) {
+dlarfg :: proc "contextless" (n: int, alpha_in: f64, x: []f64, incx: int) -> (beta: f64, tau: f64) {
     ZERO :: 0.0
     ONE :: 1.0
 
@@ -235,7 +235,7 @@ dlarfg :: proc(n: int, alpha_in: f64, x: []f64, incx: int) -> (beta: f64, tau: f
 //   c     - On entry, the m by n matrix C. On exit, C is overwritten by H * C or C * H.
 //   ldc   - Leading dimension of C
 //   work  - Workspace array of length n (if side = 'L') or m (if side = 'R')
-dlarf :: proc(
+dlarf :: proc "contextless" (
     side: Side,
     m: int,
     n: int,
@@ -272,7 +272,7 @@ dlarf :: proc(
 
 // dlaset initializes an m-by-n matrix A to beta on the diagonal and alpha
 // on the offdiagonals.
-dlaset :: proc(uplo: Uplo, m: int, n: int, alpha: f64, beta_diag: f64, a: []f64, lda: int) {
+dlaset :: proc "contextless" (uplo: Uplo, m: int, n: int, alpha: f64, beta_diag: f64, a: []f64, lda: int) {
     if uplo == .Upper {
         // Set the upper triangle of A to alpha
         for j in 0 ..< n {

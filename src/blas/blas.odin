@@ -9,6 +9,13 @@
 // - Least squares (lstsq.odin): ols_solve_dense and Ols_Accum, for solving
 //   min ||X*beta - y||. See docs/OLS_PLAN.md and docs/OLS_RESULTS.md.
 //
+// Every procedure here is declared `proc "contextless"`. The package allocates
+// nothing -- all memory is caller-supplied, sized by the *_scratch procedures --
+// and `contextless` is what makes that a compile-time property rather than a
+// convention: `make` inside one of these is a compile error. It also means the
+// package is callable where no Odin context exists, such as a C callback or a
+// thread not bootstrapped by the Odin runtime.
+//
 // All routines follow the conventions of the Reference BLAS/LAPACK implementation.
 //
 // STORAGE: matrices are row-major (C-style). `lda` is the ROW STRIDE -- the

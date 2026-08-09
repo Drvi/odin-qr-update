@@ -44,7 +44,7 @@ Ols_Error :: enum {
 // True for finite values only: false for NaN (all comparisons with NaN are
 // false) and for both infinities. One compare on the common path.
 @(private = "file")
-is_finite :: #force_inline proc(v: f64) -> bool {
+is_finite :: #force_inline proc "contextless" (v: f64) -> bool {
 	return abs(v) <= max(f64)
 }
 
@@ -53,7 +53,7 @@ is_finite :: #force_inline proc(v: f64) -> bool {
 // ============================================================================
 
 // Scratch required by ols_solve_dense, in f64 elements.
-ols_dense_scratch :: proc(n: int) -> int {
+ols_dense_scratch :: proc "contextless" (n: int) -> int {
 	return 2 * n + 1
 }
 
@@ -76,7 +76,7 @@ ols_dense_scratch :: proc(n: int) -> int {
 //
 // x and y are destroyed because that is what makes the routine allocation-free;
 // copy them first if you need them afterwards.
-ols_solve_dense :: proc(
+ols_solve_dense :: proc "contextless" (
 	m: int,
 	n: int,
 	x: []f64,
@@ -162,7 +162,7 @@ ols_solve_dense :: proc(
 //   tau   in      f64[>= min(m,n)] from dgeqrf.
 //   c     in/out  f64, m x ncols, row-major, stride ldc. Overwritten.
 //   work  temp    f64[>= ncols].
-ols_apply_qt :: proc(
+ols_apply_qt :: proc "contextless" (
 	m: int,
 	n: int,
 	a: []f64,
@@ -216,7 +216,7 @@ Ols_Accum :: struct {
 }
 
 // Scratch required by ols_accum_init, in f64 elements. One contiguous block.
-ols_accum_scratch :: proc(n: int) -> int {
+ols_accum_scratch :: proc "contextless" (n: int) -> int {
 	return (n + 1) * (n + 1) + (n + 1)
 }
 
@@ -225,7 +225,7 @@ ols_accum_scratch :: proc(n: int) -> int {
 // The block must be at least ols_accum_scratch(n) f64 and must stay alive and
 // untouched by the caller for as long as the accumulator is used -- typically
 // across many frames. It is zeroed here.
-ols_accum_init :: proc(acc: ^Ols_Accum, n: int, scratch: []f64) -> Ols_Error {
+ols_accum_init :: proc "contextless" (acc: ^Ols_Accum, n: int, scratch: []f64) -> Ols_Error {
 	if n < 1 {
 		return .Invalid_Dimension
 	}
@@ -243,7 +243,7 @@ ols_accum_init :: proc(acc: ^Ols_Accum, n: int, scratch: []f64) -> Ols_Error {
 
 // ols_accum_reset clears the accumulator back to zero observations, keeping
 // the same block. Use this to start a new fit without reallocating.
-ols_accum_reset :: proc(acc: ^Ols_Accum) {
+ols_accum_reset :: proc "contextless" (acc: ^Ols_Accum) {
 	for i in 0 ..< len(acc.tri) {
 		acc.tri[i] = 0.0
 	}
@@ -279,7 +279,7 @@ ols_accum_reset :: proc(acc: ^Ols_Accum) {
 // is the only data-dependent branch and is essentially never taken on dense
 // input, so it predicts well; it is kept because it makes structurally sparse
 // rows cheap and is a no-op otherwise.
-ols_accum_rows :: proc(
+ols_accum_rows :: proc "contextless" (
 	acc: ^Ols_Accum,
 	x: []f64,
 	ldx: int,
@@ -329,7 +329,7 @@ ols_accum_rows :: proc(
 // ols_absorb_row folds one staged row into the triangle with n+1 Givens
 // rotations, zeroing it as it goes. `row` is left all zeros.
 @(private = "file")
-ols_absorb_row :: proc(tri: []f64, ld: int, row: []f64, n: int) {
+ols_absorb_row :: proc "contextless" (tri: []f64, ld: int, row: []f64, n: int) {
 	for j in 0 ..< n + 1 {
 		g := row[j]
 		if g == 0.0 {
@@ -357,7 +357,7 @@ ols_absorb_row :: proc(tri: []f64, ld: int, row: []f64, n: int) {
 // so streaming can continue afterwards.
 //
 // Cost: n^2. Does not touch the input data.
-ols_accum_solve :: proc(
+ols_accum_solve :: proc "contextless" (
 	acc: ^Ols_Accum,
 	beta: []f64,
 	rcond: f64 = OLS_DEFAULT_RCOND,
@@ -428,7 +428,7 @@ ols_accum_solve :: proc(
 // Cost: (src.n + 1) row folds into a (k+1) triangle, so O(src.n * k^2) --
 // INDEPENDENT OF m. Re-accumulating the sub-model from raw data instead costs
 // O(m * k^2), so this is cheaper by a factor of about m / src.n.
-ols_accum_select :: proc(dst: ^Ols_Accum, src: ^Ols_Accum, keep: []int) -> Ols_Error {
+ols_accum_select :: proc "contextless" (dst: ^Ols_Accum, src: ^Ols_Accum, keep: []int) -> Ols_Error {
 	if dst.n < 1 || src.n < 1 {
 		return .Invalid_Dimension
 	}
@@ -486,7 +486,7 @@ ols_accum_select :: proc(dst: ^Ols_Accum, src: ^Ols_Accum, keep: []int) -> Ols_E
 // This is what makes data experimentation cheap. Accumulate one triangle per
 // segment -- per level, per session, per cohort -- and any union of segments
 // costs O(n^3) instead of a fresh pass over the rows.
-ols_accum_merge :: proc(dst: ^Ols_Accum, src: ^Ols_Accum) -> Ols_Error {
+ols_accum_merge :: proc "contextless" (dst: ^Ols_Accum, src: ^Ols_Accum) -> Ols_Error {
 	if dst.n < 1 || dst.n != src.n {
 		return .Invalid_Dimension
 	}
@@ -511,7 +511,7 @@ ols_accum_merge :: proc(dst: ^Ols_Accum, src: ^Ols_Accum) -> Ols_Error {
 // Free: the augmented factorization leaves the residual norm sitting on
 // tri[n, n], so this needs no pass over the data and no prior call to
 // ols_accum_solve.
-ols_accum_rss :: proc(acc: ^Ols_Accum) -> f64 {
+ols_accum_rss :: proc "contextless" (acc: ^Ols_Accum) -> f64 {
 	if acc.n < 1 {
 		return 0.0
 	}
@@ -525,7 +525,7 @@ ols_accum_rss :: proc(acc: ^Ols_Accum) -> f64 {
 // Multiply by your measured flops-per-second: for the frame budget B seconds
 // and rate F, batch = B*F / ols_flops_per_row(n). Measure F on the target
 // machine; do not assume it.
-ols_flops_per_row :: proc(n: int) -> int {
+ols_flops_per_row :: proc "contextless" (n: int) -> int {
 	return 3 * n * (n + 1)
 }
 
@@ -538,7 +538,7 @@ ols_flops_per_row :: proc(n: int) -> int {
 // Cost: 2mn, one linear pass. This recomputes from the data on purpose -- the
 // residual reported by the solvers comes out of the factorization instead, so
 // the two agreeing is a real check.
-ols_residual_norm :: proc(m, n: int, x: []f64, ldx: int, beta: []f64, y: []f64) -> f64 {
+ols_residual_norm :: proc "contextless" (m, n: int, x: []f64, ldx: int, beta: []f64, y: []f64) -> f64 {
 	if m < 1 || n < 1 || ldx < n {
 		return 0.0
 	}

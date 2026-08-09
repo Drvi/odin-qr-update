@@ -190,11 +190,18 @@ or BIC is caller arithmetic over `(rss, nrows, k)`, all of which are already
 exposed. That is also why `issues/003` stays deferred: a scoring rule would
 have to pick a degrees-of-freedom convention on the user's behalf.
 
-**No allocation.** Every routine takes caller-owned memory sized by a `*_scratch`
-procedure. There is no allocator parameter, no `init`/`destroy` pair and no
-hidden temporary, so the subsystem runs from an arena, a fixed frame budget or
-no heap at all. `test_ols_no_allocation` enforces this by exercising the whole
-API under `mem.panic_allocator`.
+**No allocation, enforced by the compiler.** Every routine takes caller-owned
+memory sized by a `*_scratch` procedure. There is no allocator parameter, no
+`init`/`destroy` pair and no hidden temporary, so the subsystem runs from an
+arena, a fixed frame budget or no heap at all.
+
+Two layers hold this in place. `test_ols_no_allocation` exercises the whole API
+under `mem.panic_allocator`, catching an allocation at run time on the paths it
+covers. More importantly every procedure in `src/blas` is declared
+`proc "contextless"`, so an allocation cannot be written in the first place —
+`make` inside one is a compile error, on every path, for every future edit.
+Measured cost of the annotation: none (see `docs/OLS_RESULTS.md`); it was added
+for the guarantee, not for speed.
 
 ### Boundary policy (explicit, at every input)
 

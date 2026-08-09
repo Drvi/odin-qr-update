@@ -28,7 +28,7 @@ package blas
 //           Used to store cosines and sines of rotations
 //
 // Note: This routine does not update Q. Use delcolsq if Q update is needed.
-delcols :: proc(m: int, n: int, k: int, p: int, r: []f64, ldr: int, work: []f64) {
+delcols :: proc "contextless" (m: int, n: int, k: int, p: int, r: []f64, ldr: int, work: []f64) {
     // Quick return if nothing to do
     if p <= 0 || k >= n || m <= 0 {
         return
@@ -125,7 +125,7 @@ delcols :: proc(m: int, n: int, k: int, p: int, r: []f64, ldr: int, work: []f64)
 //           On exit: m by (n-p) upper trapezoidal matrix R'
 //   ldr   - Leading dimension of R
 //   work  - Workspace of size at least 2*min(m-1, n-k-p)
-delcolsq :: proc(m: int, n: int, k: int, p: int, q: []f64, ldq: int, r: []f64, ldr: int, work: []f64) {
+delcolsq :: proc "contextless" (m: int, n: int, k: int, p: int, q: []f64, ldq: int, r: []f64, ldr: int, work: []f64) {
     // Quick return if nothing to do
     if p <= 0 || k >= n || m <= 0 {
         return
@@ -210,7 +210,7 @@ delcolsq :: proc(m: int, n: int, k: int, p: int, q: []f64, ldq: int, r: []f64, l
 // Note: This routine does not update Q. Use addcolsq if Q update is needed.
 // The input u is assumed to be premultiplied by Q^T (i.e., u contains Q^T * A_new
 // where A_new are the actual new columns to insert).
-addcols :: proc(m: int, n: int, k: int, p: int, r: []f64, ldr: int, u: []f64, ldu: int, work: []f64) {
+addcols :: proc "contextless" (m: int, n: int, k: int, p: int, r: []f64, ldr: int, u: []f64, ldu: int, work: []f64) {
     // Quick return if nothing to do
     if p <= 0 || m <= 0 {
         return
@@ -307,7 +307,7 @@ addcols :: proc(m: int, n: int, k: int, p: int, r: []f64, ldr: int, u: []f64, ld
 //   u     - m by p matrix containing the new columns (the actual columns, not Q^T * columns)
 //   ldu   - Leading dimension of U
 //   work  - Workspace of size at least m
-addcolsq :: proc(
+addcolsq :: proc "contextless" (
     m: int,
     n: int,
     k: int,
@@ -428,7 +428,7 @@ addcolsq :: proc(
 //   u     - p by n matrix containing the new rows
 //   ldu   - Leading dimension of U
 //   work  - Workspace of size at least n
-addrows :: proc(m: int, n: int, p: int, r: []f64, ldr: int, u: []f64, ldu: int, work: []f64) {
+addrows :: proc "contextless" (m: int, n: int, p: int, r: []f64, ldr: int, u: []f64, ldu: int, work: []f64) {
     if p <= 0 || n <= 0 {
         return
     }
@@ -496,7 +496,7 @@ addrows :: proc(m: int, n: int, p: int, r: []f64, ldr: int, u: []f64, ldu: int, 
 //           On exit: (m-p) by n upper trapezoidal matrix R'
 //   ldr   - Leading dimension of R
 //   work  - Workspace of size at least max(m, n)
-delrows :: proc(m: int, n: int, k: int, p: int, q: []f64, ldq: int, r: []f64, ldr: int, work: []f64) {
+delrows :: proc "contextless" (m: int, n: int, k: int, p: int, q: []f64, ldq: int, r: []f64, ldr: int, work: []f64) {
     if p <= 0 || k >= m || m <= 0 {
         return
     }

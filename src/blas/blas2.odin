@@ -50,7 +50,7 @@ Side :: enum {
 //   beta  - scalar beta
 //   y     - input/output vector
 //   incy  - increment for y
-dgemv :: proc(
+dgemv :: proc "contextless" (
     trans: Transpose,
     m: int,
     n: int,
@@ -192,7 +192,7 @@ dgemv :: proc(
 // The Fortran algorithm carries over unchanged because it is written in terms
 // of A(i,j) rather than in terms of the storage order -- only the memory
 // access pattern differs, not the arithmetic.
-dtrsv :: proc(
+dtrsv :: proc "contextless" (
     uplo: Uplo,
     trans: Transpose,
     diag: Diag,
@@ -356,7 +356,7 @@ dtrsv :: proc(
 // dger performs the rank 1 operation A := alpha*x*y**T + A
 // where alpha is a scalar, x is an m element vector, y is an n element
 // vector and A is an m by n matrix stored row-major with row stride lda >= n.
-dger :: proc(
+dger :: proc "contextless" (
     m: int,
     n: int,
     alpha: f64,
@@ -421,7 +421,7 @@ dger :: proc(
 //    x := A*x, or x := A**T*x
 // where x is an n element vector and A is an n by n unit, or non-unit,
 // upper or lower triangular matrix.
-dtrmv :: proc(
+dtrmv :: proc "contextless" (
     uplo: Uplo,
     trans: Transpose,
     diag: Diag,

@@ -301,6 +301,41 @@ working because a default allocator happened to be available.
 the `ols_accum_scratch` / `ols_dense_scratch` size procedures, so the library
 works unchanged from an arena, a frame allocator, or with no heap at all.
 
+### …and the compiler enforces it
+
+All 46 procedures in `src/blas` are declared `proc "contextless"`. That is the
+stronger form of the same guarantee: `mem.panic_allocator` catches an
+allocation at run time on paths a test happens to exercise, whereas
+`contextless` makes one impossible to write. Verified by trying:
+
+    ols_flops_per_row :: proc "contextless" (n: int) -> int {
+        sneaky := make([]f64, n)   // Error: 'context' has not been defined
+        ...                        // within this scope, but is required
+    }                              // for this procedure call
+
+So the property now holds for every future edit without anyone having to
+remember it, and it holds on paths no test covers.
+
+It also makes the library callable where no Odin context exists at all — from a
+C callback, from a thread not bootstrapped by the Odin runtime, or before
+context setup — which matters for embedding in an engine.
+
+**No measurable performance change.** Accumulating `m = 1e6, n = 5`, eleven
+trials per build, three interleaved rounds:
+
+| round | without `contextless` | with |
+|---|---|---|
+| 1 | 109.93 ms | 110.92 ms |
+| 2 | 110.20 ms | 109.66 ms |
+| 3 | 110.69 ms | 111.35 ms |
+
+(minima; the 0.3% mean difference is smaller than the ~0.8 ms round-to-round
+spread within either build). That is expected rather than disappointing — the
+implicit context pointer is one register argument per *call*, and these
+routines are called once per batch, with measured per-call overhead of 0.12 ns
+regardless. The annotation was added for the guarantee, not for speed, and no
+speed claim is made for it.
+
 Both examples under `examples/incremental` and `examples/model_iteration`
 install `mem.panic_allocator` in `main` and use fixed arrays throughout, so
 they demonstrate the property rather than just asserting it.
