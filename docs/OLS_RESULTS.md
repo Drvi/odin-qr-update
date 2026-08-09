@@ -3,10 +3,20 @@
 Step 7 of `docs/OLS_PLAN.md`. Reports what was measured, what matched, and
 what was **not** verified.
 
-Machine: the development container this was built in (Linux x86-64).
-Compiler: Odin `dev-2026-08-nightly:902106f`, `-o:speed`.
-All figures below are measured on that machine. They are not portable
-constants; re-measure on your target.
+Machine: `Intel(R) Xeon(R) @ 2.80GHz`, 4 vCPU, 1 thread/core, **33 MiB L3**,
+AVX-512 present (`avx512f/dq/cd/bw/vl/vnni`). Linux x86-64 container.
+Compiler: Odin `dev-2026-08-nightly:902106f`, `-o:speed`. Single-threaded.
+
+**This is a server part and it is not a representative target.** Per the Steam
+hardware survey, the modal gaming machine is a 6-core (27.52%) or 8-core
+(27.85%) consumer CPU; 21.12% of Intel parts report 2.3-2.69 GHz. So the clock
+here is ordinary, but 33 MiB of L3 is generous against consumer parts, and most
+consumer gaming CPUs have no AVX-512 at all. Numbers measured here on anything
+cache-resident are optimistic.
+
+Because of that, the section below establishes **what each path is bound by**
+before quoting any absolute figure, and the shipped example takes no measured
+constant from this document — it spends a time budget against the clock instead.
 
 ## Bugs found and fixed before the new work
 
@@ -57,9 +67,41 @@ is that one path is quadratic in `m` and the other is linear.
 **Criterion 5 (dense at `m = 8000, n = 5` under one 60 Hz frame): met.**
 0.3698 ms against a 16.67 ms budget, 45x headroom.
 
-## Measurement: where the frame budget actually breaks
+## Measurement: what each path is bound by
 
-New dense path, `n = 5`:
+This is the measurement that decides how far any of the others travel. Input
+working set swept from inside L1 to far past the 33 MiB L3, `n = 5`:
+
+| input working set | accumulator | dense |
+|---|---|---|
+| 47 KiB | 8.71 Mrows/s | 24.90 Mrows/s |
+| 234 KiB | 8.85 | 23.67 |
+| 938 KiB | 8.77 | 22.89 |
+| 4.6 MiB | 8.80 | 16.99 |
+| 18 MiB | 8.79 | 15.90 |
+| 92 MiB | 8.63 | 6.48 |
+| 366 MiB | 8.62 | 6.40 |
+
+**The accumulator is flat to within 2.6% across an 8000x span of working set.**
+It sustains 0.79 GFLOP/s and 0.39 GiB/s — far below anything this CPU can
+saturate — so it is neither bandwidth-bound nor FLOP-bound. It is latency-bound
+on the dependent chain of Givens rotations, with 336 bytes of hot state that
+lives in L1 on any machine. That makes it the portable one: it should scale
+with clock and IPC, and a consumer part with a quarter of this L3 has nothing
+to lose here. 0.39 GiB/s is a rounding error against any DDR4 system.
+
+**The dense path falls 3.9x** once the input stops fitting in L3. It streams
+`X` and is genuinely memory-sensitive, so its numbers are the ones that will
+not survive a move to a smaller-cache machine.
+
+### Where the frame budget breaks, restated
+
+Earlier drafts of this document read a threshold of `m = 250 000` off the
+`m = 100 000` timing. That row is 4.6 MiB — comfortably L3-resident here — so
+the figure was an in-cache extrapolation and too optimistic. Using the
+out-of-cache rate of 6.4 Mrows/s instead, one 16.67 ms frame buys about
+**107 000 rows** on this machine, and less on a machine with less cache or a
+lower clock.
 
 | m | ms | frames at 60 Hz |
 |---|---|---|
@@ -68,9 +110,29 @@ New dense path, `n = 5`:
 | 1 000 000 | 156.326 | 9.38 |
 | 4 000 000 | 680.250 | 40.81 |
 
-A single resident solve fits in one frame up to roughly `m = 250 000`.
-Frame-spreading is only needed above that. The timings include copying the
-input, because `ols_solve_dense` destroys it.
+Treat `m ~ 100 000` as the order of magnitude at which the resident path stops
+fitting a frame here, and calibrate rather than inheriting it. The timings
+include copying the input, because `ols_solve_dense` destroys it.
+
+## Measurement: cost against n
+
+`m = 200 000`. The accumulator is `O(n^2)` per row by construction, but the
+inner `drot` vectorizes better as it lengthens, so realised cost grows more
+slowly than `n^2`:
+
+| n | Mrows/s | GFLOP/s | state bytes | us per 1000 rows |
+|---|---|---|---|---|
+| 2 | 22.60 | 0.41 | 96 | 44 |
+| 4 | 10.72 | 0.64 | 240 | 93 |
+| 8 | 5.68 | 1.23 | 720 | 176 |
+| 16 | 2.73 | 2.23 | 2 448 | 366 |
+| 32 | 1.16 | 3.68 | 8 976 | 862 |
+| 64 | 0.43 | 5.33 | 34 320 | 2 340 |
+
+`n = 2 -> 64` is a 32x rise in `n` and would be 693x on flop count alone, but
+throughput drops only 52x, because achieved GFLOP/s climbs 13x over the same
+range. At `n = 64` the state is 34 KiB and starts to leave L1, which is where
+the assumption that `n` is small begins to pay for itself.
 
 ## Measurement: accumulator
 
@@ -108,9 +170,28 @@ one-row-per-call case. This is what justifies having no step function or phase
 machine: the caller can pick any batch size that fits their budget and pay
 nothing for the choice.
 
-Sizing a batch from a frame budget, using the measured 8.8 M rows/s: a 2 ms
-slice of a 16.67 ms frame absorbs about 17 600 rows. Measure the rate on your
-own target rather than reusing that number.
+### Sizing a batch without inheriting this machine
+
+Do not convert a frame budget into a row count with a rows-per-second constant
+from this document. Such a constant is wrong in both directions on hardware it
+was not measured on — it overruns the budget on a slower part and leaves the
+budget unspent on a faster one — and the survey spread is wide enough that both
+happen in practice.
+
+`examples/incremental/main.odin` spends the budget against the clock instead:
+absorb `BUDGET_CHECK_ROWS` (512) rows, check elapsed time, repeat until the
+budget is gone. This needs no calibration, no tuning constant, and no knowledge
+of the target. It is correct on hardware this was never run on, which is the
+property that actually matters.
+
+Its two costs are both bounded by the measurements above: a tick read every 512
+rows against ~58 us of work per interval here (proportionally more on a slower
+machine, so the relative overhead only falls), and an overshoot of at most 512
+rows past the deadline. Batching at 512 is free per the table above.
+
+An earlier version of that example carried `MEASURED_ROWS_PER_SEC ::
+8_800_000.0` taken from this machine. That was the wrong shape of solution and
+has been removed.
 
 ## Correctness verification
 
@@ -143,12 +224,27 @@ Full suite: 21 tests, 0 failures (13 pre-existing, 8 new).
   benign. The Givens accumulator and Householder QR are both backward stable
   in theory, but the plan's disproof condition — "Transform B materially less
   accurate than Transform A" — was only tested at low condition numbers.
-- **No measurement on target hardware.** All figures come from one
-  container on one machine, single run per configuration, no variance
-  reported. The old-path timings visibly drift between runs.
-- **`n > 100` was not measured.** The design assumes small `n`; the
-  accumulator's per-row `O(n^2)` cost makes it the wrong machine for large
-  `n`, but where the crossover sits was not established.
+- **Nothing was measured on representative target hardware.** Every figure
+  comes from one server-class container — 33 MiB L3, AVX-512, 4 vCPU — with a
+  single run per configuration and no variance reported. The old-path timings
+  visibly drift between runs. What has been established is the *shape*: the
+  accumulator is latency-bound with a 336-byte working set and flat across an
+  8000x sweep, so it should port predictably; the dense path is memory-bound
+  with a measured 3.9x cache cliff, so it should not. Neither claim has been
+  checked on a consumer part, and the accumulator's portability argument in
+  particular is an inference from the boundedness measurement, not a
+  measurement on other hardware.
+- **No AVX-512-free measurement.** Most consumer gaming CPUs lack it. The
+  inner `drot` is where any vectorisation would land, and the `n`-sweep shows
+  achieved GFLOP/s climbing 13x with `n`, which suggests the compiler is
+  vectorising it — so a machine without AVX-512 may behave differently,
+  especially at larger `n`. Not tested; no `-microarch` sweep was run.
+- **`n > 64` was not measured.** The design assumes small `n`. At `n = 64` the
+  accumulator state is 34 KiB and is leaving L1, which is where the small-`n`
+  assumption starts to earn its keep, but the crossover was not pinned down.
+- **Single-threaded only, and core count was not exploited.** The survey's
+  modal machine has 6-8 physical cores; this uses one. See
+  `issues/004-parallel-accumulation.md`.
 - **Not multithreaded.** See `issues/004-parallel-accumulation.md`.
 - **`delrows` / `delcolsq` were not revisited.** They are outside this
   subsystem and keep their existing test coverage.

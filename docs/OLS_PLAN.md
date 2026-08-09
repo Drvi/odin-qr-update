@@ -62,6 +62,15 @@ accumulation would be the wrong machine.
 right-hand sides** — affects the decision to take one `y` rather than a
 block. Filed as `issues/001-multiple-rhs.md`.
 
+**The platform is consumer hardware, not this development machine.** Per the
+Steam hardware survey the modal target is a 6-core (27.52%) or 8-core (27.85%)
+consumer CPU, commonly clocked 2.3-2.69 GHz, typically without AVX-512 and
+with materially less L3 than the 33 MiB server part these measurements were
+taken on. This is a real platform constraint, so it is stated here rather than
+discovered later: **no rows-per-second constant measured here may be baked into
+shipped code.** Budgets are spent against the clock, and §3 establishes what
+each transform is bound by before quoting any absolute figure.
+
 ## 3. State the cost
 
 Measured on this machine, `n = 5`, `-o:speed`, current

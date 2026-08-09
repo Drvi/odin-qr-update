@@ -21,6 +21,7 @@ package incremental_example
 
 import "core:fmt"
 import "core:math"
+import "core:time"
 import blas "../../src/blas"
 
 N :: 4 // predictors, including the intercept
@@ -78,6 +79,44 @@ report :: proc(label: string, acc: ^blas.Ols_Accum) {
 	fmt.printf("]  rms = %.4f\n", math.sqrt_f64(rss / f64(acc.nrows)))
 }
 
+// Rows absorbed between clock reads. Bounds how far past the deadline a
+// frame can run: at most this many rows of work. Measured cost of batching is
+// zero above ~64 rows (docs/OLS_RESULTS.md), so this is free, and a tick read
+// is tens of nanoseconds against tens of microseconds of work per interval.
+// Lower it if you are targeting hardware slow enough that the overshoot
+// matters; the correctness of the result does not depend on it.
+BUDGET_CHECK_ROWS :: 512
+
+// absorb_within folds rows until the time budget is spent or the data runs
+// out, whichever comes first. Returns whether every row has been absorbed.
+//
+// This is the whole of "spread the work across frames" -- there is no step
+// function or job object in the library because this loop is the state machine
+// and it belongs to the caller, who is the only one who knows the budget.
+absorb_within :: proc(
+	acc: ^blas.Ols_Accum,
+	x: []f64,
+	y: []f64,
+	m: int,
+	budget_ms: f64,
+) -> (
+	done: bool,
+	err: blas.Ols_Error,
+) {
+	start := time.tick_now()
+	for acc.nrows < m {
+		take := min(BUDGET_CHECK_ROWS, m - acc.nrows)
+		if _, e := blas.ols_accum_rows(acc, x[acc.nrows * N:], N, y[acc.nrows:], take);
+		   e != .None {
+			return false, e
+		}
+		if time.duration_milliseconds(time.tick_since(start)) >= budget_ms {
+			break
+		}
+	}
+	return acc.nrows >= m, .None
+}
+
 // ============================================================================
 // Regime 1: resident data, chunked across frames
 // ============================================================================
@@ -99,26 +138,16 @@ chunked_across_frames :: proc() {
 		return
 	}
 
-	// Convert a time budget into a row count. 8.8 M rows/s was measured for
-	// n = 5 on the development machine (docs/OLS_RESULTS.md) -- measure it on
-	// your own target rather than trusting this constant.
-	MEASURED_ROWS_PER_SEC :: 8_800_000.0
-	rows_per_frame := int(FRAME_BUDGET_MS * 0.001 * MEASURED_ROWS_PER_SEC)
-
-	fmt.printf(
-		"  budget %.1f ms/frame -> %d rows/frame, %d frames expected\n",
-		FRAME_BUDGET_MS,
-		rows_per_frame,
-		(M + rows_per_frame - 1) / rows_per_frame,
-	)
+	fmt.printf("  budget %.1f ms/frame, spent against the clock\n", FRAME_BUDGET_MS)
 
 	frame := 0
 	for acc.nrows < M {
-		take := min(rows_per_frame, M - acc.nrows)
-
-		// This is the whole per-frame call.
-		_, err := blas.ols_accum_rows(&acc, x[acc.nrows * N:], N, y[acc.nrows:], take)
-		if err != .None {
+		// Spend the budget rather than a precomputed row count. A rows-per-frame
+		// constant tuned on one machine overshoots the budget on a slower one
+		// and wastes it on a faster one; the Steam hardware survey spans both
+		// directions. Reading the clock instead needs no calibration and is
+		// correct on hardware this was never run on.
+		if _, err := absorb_within(&acc, x, y, M, FRAME_BUDGET_MS); err != .None {
 			fmt.printf("  bad data at row %d: %v\n", acc.nrows, err)
 			return
 		}
