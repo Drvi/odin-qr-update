@@ -41,30 +41,28 @@ rng_normal :: proc(r: ^RNG) -> f64 {
 // procedure built the full m x m Q via dorgqr and then did a second m x m pass
 // to form Q^T*b; that was 489 MiB and 28 s at m = 8000 against 0.37 ms here.
 // See docs/OLS_RESULTS.md.
+// All working memory is passed in. An earlier version allocated the copies and
+// the scratch internally, which hides the cost from the caller and forces the
+// context allocator on them; the library itself allocates nothing, and helpers
+// built on it should not either. Size the buffers with blas.ols_dense_scratch.
 solve_ls_qr :: proc(
     m: int, n: int,
     a: []f64, lda: int,
     b: []f64,
     x: []f64,
-    work: []f64,
+    a_copy: []f64,   // >= m*lda, destroyed
+    b_copy: []f64,   // >= m, destroyed
+    scratch: []f64,  // >= blas.ols_dense_scratch(n)
 ) {
     // ols_solve_dense destroys both inputs, so hand it copies.
-    a_copy := make([]f64, m * lda)
-    defer delete(a_copy)
     for i in 0 ..< m * lda {
         a_copy[i] = a[i]
     }
-
-    b_copy := make([]f64, m)
-    defer delete(b_copy)
     for i in 0 ..< m {
         b_copy[i] = b[i]
     }
 
-    scratch := make([]f64, blas.ols_dense_scratch(n))
-    defer delete(scratch)
-
-    _, err := blas.ols_solve_dense(m, n, a_copy, lda, b_copy, x, scratch)
+    _, err := blas.ols_solve_dense(m, n, a_copy[:m * lda], lda, b_copy[:m], x, scratch)
     if err != .None {
         fmt.printf("solve_ls_qr: %v\n", err)
         for i in 0 ..< n {
@@ -161,9 +159,19 @@ main :: proc() {
         y_full[i] += 0.5 * rng_normal(&rng)  // Add noise
     }
 
-    // Work arrays
+    // Work arrays. Sized once here for the largest case any call below uses,
+    // then reused -- the solver never allocates, so the caller owns every byte.
     work := make([]f64, 100)
     defer delete(work)
+
+    MAX_M :: M + 5
+    MAX_LDA :: lda
+    ls_a := make([]f64, MAX_M * MAX_LDA)
+    defer delete(ls_a)
+    ls_b := make([]f64, MAX_M)
+    defer delete(ls_b)
+    ls_scratch := make([]f64, blas.ols_dense_scratch(N + 3))
+    defer delete(ls_scratch)
 
     // =========================================================================
     // 1. Fit initial model
@@ -173,7 +181,7 @@ main :: proc() {
     beta_hat := make([]f64, N)
     defer delete(beta_hat)
 
-    solve_ls_qr(M, N, x_full, lda, y_full, beta_hat, work)
+    solve_ls_qr(M, N, x_full, lda, y_full, beta_hat, ls_a, ls_b, ls_scratch)
 
     fmt.println("True coefficients:     ", beta_true[:])
     fmt.printf("Estimated coefficients: [")
@@ -255,7 +263,7 @@ main :: proc() {
 
     beta_del_recompute := make([]f64, N - 1)
     defer delete(beta_del_recompute)
-    solve_ls_qr(M, N - 1, x_del, N - 1, y_full, beta_del_recompute, work)
+    solve_ls_qr(M, N - 1, x_del, N - 1, y_full, beta_del_recompute, ls_a, ls_b, ls_scratch)
 
     fmt.printf("Coefficients (QR update):   [")
     for i in 0 ..< N - 1 {
@@ -341,7 +349,7 @@ main :: proc() {
 
     beta_add_recompute := make([]f64, N + 1)
     defer delete(beta_add_recompute)
-    solve_ls_qr(M, N + 1, x_add, N + 1, y_full, beta_add_recompute, work)
+    solve_ls_qr(M, N + 1, x_add, N + 1, y_full, beta_add_recompute, ls_a, ls_b, ls_scratch)
 
     fmt.printf("Coefficients (QR update):   [")
     for i in 0 ..< N + 1 {
@@ -434,7 +442,7 @@ main :: proc() {
 
     beta_addrow_recompute := make([]f64, N)
     defer delete(beta_addrow_recompute)
-    solve_ls_qr(M + NUM_NEW_ROWS, N, x_extended, N, y_extended, beta_addrow_recompute, work)
+    solve_ls_qr(M + NUM_NEW_ROWS, N, x_extended, N, y_extended, beta_addrow_recompute, ls_a, ls_b, ls_scratch)
 
     // Verify R from update matches R from full recompute
     a_qr_full := make([]f64, (M + NUM_NEW_ROWS) * N)

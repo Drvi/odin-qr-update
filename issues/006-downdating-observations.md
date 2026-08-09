@@ -14,7 +14,7 @@ What exists today:
   removed rows are not separable in advance.
 - Keep one accumulator per segment and merge the subset you want. O(n^3) per
   combination and exact, but it requires deciding the segmentation up front.
-  This is the recommended pattern and what examples/model_search demonstrates.
+  This is the recommended pattern and what examples/model_iteration demonstrates.
 
 What is missing: true downdating, removing a row from an existing triangle via
 hyperbolic rotations. Deliberately not implemented. Downdating is numerically

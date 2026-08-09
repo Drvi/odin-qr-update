@@ -8,6 +8,7 @@ package tests
 
 import "core:fmt"
 import "core:math"
+import "core:mem"
 import "../src/blas"
 
 REAL_M :: 20
@@ -2252,5 +2253,123 @@ test_ols_degenerate_shapes :: proc() -> bool {
 	}
 
 	fmt.println("  PASSED")
+	return true
+}
+
+// ============================================================================
+// The library must never allocate
+// ============================================================================
+
+// Every entry point exercised with context.allocator AND context.temp_allocator
+// set to mem.panic_allocator, and every buffer a stack array. Any hidden
+// allocation anywhere in the call tree aborts the process rather than quietly
+// working because the default allocator happened to be available.
+//
+// This is the enforceable form of the guarantee: callers supply all memory,
+// so the library is usable from an arena, a frame allocator, or a fixed
+// budget with no heap at all.
+test_ols_no_allocation :: proc() -> bool {
+	fmt.println("Testing the whole OLS API under mem.panic_allocator...")
+
+	saved_alloc := context.allocator
+	saved_temp := context.temp_allocator
+	defer {
+		context.allocator = saved_alloc
+		context.temp_allocator = saved_temp
+	}
+	context.allocator = mem.panic_allocator()
+	context.temp_allocator = mem.panic_allocator()
+
+	N :: REAL_N
+
+	// Stack scratch, sized by the library's own size procedures. These are
+	// compile-time constants here only because N is; ols_accum_scratch(N) is
+	// the general form.
+	accum_buf: [(N + 1) * (N + 1) + (N + 1)]f64
+	sub_buf: [(N + 1) * (N + 1) + (N + 1)]f64
+	other_buf: [(N + 1) * (N + 1) + (N + 1)]f64
+	dense_buf: [2 * N + 1]f64
+	beta: [N]f64
+
+	if len(accum_buf) < blas.ols_accum_scratch(N) || len(dense_buf) < blas.ols_dense_scratch(N) {
+		fmt.println("  FAILED: stack scratch smaller than the size procedures require")
+		return false
+	}
+
+	// --- accumulator path
+	acc: blas.Ols_Accum
+	if e := blas.ols_accum_init(&acc, N, accum_buf[:]); e != .None {
+		fmt.printf("  FAILED: init %v\n", e)
+		return false
+	}
+	if _, e := blas.ols_accum_rows(&acc, real_x[:], N, real_y[:], REAL_M); e != .None {
+		fmt.printf("  FAILED: accumulate %v\n", e)
+		return false
+	}
+	if e := blas.ols_accum_solve(&acc, beta[:]); e != .None {
+		fmt.printf("  FAILED: solve %v\n", e)
+		return false
+	}
+	for j in 0 ..< N {
+		if abs(beta[j] - truth_beta[j]) > 1e-12 {
+			fmt.printf("  FAILED: beta[%d] wrong under panic allocator\n", j)
+			return false
+		}
+	}
+	_ = blas.ols_accum_rss(&acc)
+	_ = blas.ols_flops_per_row(N)
+	_ = blas.ols_residual_norm(REAL_M, N, real_x[:], N, beta[:], real_y[:])
+
+	// --- select
+	sub: blas.Ols_Accum
+	keep := [3]int{0, 2, 4}
+	if e := blas.ols_accum_init(&sub, 3, sub_buf[:]); e != .None {
+		fmt.printf("  FAILED: sub init %v\n", e)
+		return false
+	}
+	if e := blas.ols_accum_select(&sub, &acc, keep[:]); e != .None {
+		fmt.printf("  FAILED: select %v\n", e)
+		return false
+	}
+	if e := blas.ols_accum_solve(&sub, beta[:3]); e != .None {
+		fmt.printf("  FAILED: sub solve %v\n", e)
+		return false
+	}
+
+	// --- merge
+	other: blas.Ols_Accum
+	blas.ols_accum_init(&other, N, other_buf[:])
+	blas.ols_accum_rows(&other, real_x[:], N, real_y[:], REAL_M)
+	if e := blas.ols_accum_merge(&other, &acc); e != .None {
+		fmt.printf("  FAILED: merge %v\n", e)
+		return false
+	}
+	blas.ols_accum_reset(&other)
+
+	// --- dense path, on stack copies of the input it destroys
+	xd: [REAL_M * N]f64 = real_x
+	yd: [REAL_M]f64 = real_y
+	rss, e2 := blas.ols_solve_dense(REAL_M, N, xd[:], N, yd[:], beta[:], dense_buf[:])
+	if e2 != .None {
+		fmt.printf("  FAILED: dense %v\n", e2)
+		return false
+	}
+	if abs(rss - truth_rss) > 1e-12 {
+		fmt.printf("  FAILED: dense rss under panic allocator\n")
+		return false
+	}
+
+	// --- the underlying BLAS/QR entry points the solvers rest on
+	tau: [N]f64
+	work: [REAL_M + N]f64
+	xq: [REAL_M * N]f64 = real_x
+	bq: [REAL_M]f64 = real_y
+	blas.dgeqrf(REAL_M, N, xq[:], N, tau[:], work[:])
+	blas.ols_apply_qt(REAL_M, N, xq[:], N, tau[:], bq[:], 1, 1, work[:])
+	blas.dtrsv(.Upper, .No_Trans, .Non_Unit, N, xq[:], N, bq[:], 1)
+	_ = blas.dnrm2(REAL_M, bq[:], 1)
+	_ = blas.ddot(N, bq[:], 1, beta[:], 1)
+
+	fmt.println("  PASSED (no allocation reached the allocator)")
 	return true
 }

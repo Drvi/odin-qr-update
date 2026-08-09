@@ -195,14 +195,19 @@ has been removed.
 
 ## Measurement: model iteration
 
-The intended use is experimentation — trying predictors against data, both
-changing. The waste to remove is re-reading the rows for every candidate.
+The intended use is a person experimenting — trying predictors against data,
+both changing. The waste to remove is re-reading the rows for every model they
+try.
 
-Scoring every non-empty subset of `p = 10` candidate predictors (1023 models).
-"naive" gathers the subset's columns and re-accumulates all `m` rows each time;
-"cached" accumulates the 10-predictor triangle once and then calls
-`ols_accum_select` per subset. Both give the same coefficients — the
-`select == direct fit` test asserts it:
+The benchmark below scores 1023 models because that is a convenient way to get
+a stable measurement, **not** because anything searches automatically. Choosing
+the model is the user's job; the library has no scoring rule and no ranking.
+The number that matters is the per-model cost in the second table.
+
+"naive" gathers a subset's columns and re-accumulates all `m` rows; "cached"
+accumulates the 10-predictor triangle once, then calls `ols_accum_select` per
+model. Both give the same coefficients — the `select == direct fit` test
+asserts it:
 
 | m | naive | cached | speedup |
 |---|---|---|---|
@@ -225,15 +230,16 @@ accumulation pass. Isolating the per-operation cost:
 | 16 | 1.290 us | 1.109 us |
 | 24 | 2.758 us | 2.283 us |
 
-So at `m = 1 000 000`, `p = 10`: the first model costs one pass (~220 ms), and
-**every model after it costs about 0.5 us instead of 87 ms** — a marginal
-improvement of roughly 170 000x. Both operations read only the `(p+1)^2`
-triangle, so their cost depends on `p` alone and not on `m`; that is by
-construction rather than by measurement, since neither routine touches the
-data.
+So at `m = 1 000 000`, `p = 10`: the first model costs one pass over the data
+(~220 ms), and **every model the user tries after that costs about 0.5 us
+instead of 87 ms** — a marginal improvement of roughly 170 000x. Both
+operations read only the `(p+1)^2` triangle, so their cost depends on `p` alone
+and not on `m`; that is by construction rather than by measurement, since
+neither routine touches the data.
 
-This is what makes exhaustive search practical: 1023 models at `m = 1 000 000`
-in 0.5 ms of marginal work, against 89 seconds of refitting.
+What this buys is interactivity. At 0.5 us per model, a person can try
+hypotheses as fast as they can think of them, on a dataset of any size,
+including inside a frame.
 
 ## Correctness verification
 
@@ -253,7 +259,25 @@ The NaN test also checks recovery: after a batch aborts on row 4, the
 accumulator still holds exactly 4 rows, absorbing the remaining good rows
 succeeds, and the resulting `beta` is finite.
 
-Full suite: **29 tests, 0 failures** (13 pre-existing, 16 new).
+Full suite: **30 tests, 0 failures** (13 pre-existing, 17 new).
+
+### The library allocates nothing
+
+`test_ols_no_allocation` runs every entry point — accumulate, select, merge,
+reset, solve, rss, the dense path, `dgeqrf`, `ols_apply_qt`, `dtrsv`, `dnrm2`,
+`ddot` — with both `context.allocator` and `context.temp_allocator` set to
+`mem.panic_allocator`, and every buffer a fixed stack array. Any hidden
+allocation anywhere in the call tree aborts the process instead of quietly
+working because a default allocator happened to be available.
+
+`src/blas` imports only `core:math` and contains no `make`, `new`, `append`,
+`delete`, `context.allocator`, or `fmt` call. Callers supply all memory through
+the `ols_accum_scratch` / `ols_dense_scratch` size procedures, so the library
+works unchanged from an arena, a frame allocator, or with no heap at all.
+
+Both examples under `examples/incremental` and `examples/model_iteration`
+install `mem.panic_allocator` in `main` and use fixed arrays throughout, so
+they demonstrate the property rather than just asserting it.
 
 Tests added for model iteration and for gaps this document previously listed
 as unverified:

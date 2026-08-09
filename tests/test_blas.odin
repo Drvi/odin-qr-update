@@ -618,6 +618,7 @@ main :: proc() {
         {"apply_qt vs explicit Q", test_ols_apply_qt_vs_explicit_q},
         {"conditioning 1e2..1e8", test_ols_conditioning},
         {"degenerate shapes", test_ols_degenerate_shapes},
+        {"no allocation", test_ols_no_allocation},
     }) {
         if t.fn() {passed += 1} else {failed += 1}
     }

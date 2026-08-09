@@ -183,6 +183,19 @@ caller's invariant, stated in the contract.
 Removing observations is *not* supported; see
 `issues/006-downdating-observations.md`.
 
+**No model selection.** These are mechanisms, not policy. The library reports
+`beta` and `RSS` for whatever model is asked for and never ranks, scores, or
+searches — finding the right model is the user's job, and a criterion like AIC
+or BIC is caller arithmetic over `(rss, nrows, k)`, all of which are already
+exposed. That is also why `issues/003` stays deferred: a scoring rule would
+have to pick a degrees-of-freedom convention on the user's behalf.
+
+**No allocation.** Every routine takes caller-owned memory sized by a `*_scratch`
+procedure. There is no allocator parameter, no `init`/`destroy` pair and no
+hidden temporary, so the subsystem runs from an arena, a fixed frame budget or
+no heap at all. `test_ols_no_allocation` enforces this by exercising the whole
+API under `mem.panic_allocator`.
+
 ### Boundary policy (explicit, at every input)
 
 | Condition | Policy |
