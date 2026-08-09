@@ -42,8 +42,9 @@ Side :: enum {
 //   n     - number of columns of matrix A
 //   alpha - scalar alpha
 //   a     - matrix A stored in row-major order (m x n)
-//   lda   - leading dimension of A (stride between rows in column-major,
-//           or stride between columns in row-major; for row-major this is n)
+//   lda   - row stride of A: the distance between the starts of consecutive
+//           rows. Must be at least n. (This is the row-major analogue of the
+//           Fortran leading dimension, which is a column stride of at least m.)
 //   x     - input vector
 //   incx  - increment for x
 //   beta  - scalar beta
@@ -65,8 +66,10 @@ dgemv :: proc(
     ZERO :: 0.0
     ONE :: 1.0
 
-    // Test the input parameters
-    if m < 0 || n < 0 || lda < max(1, m) || incx == 0 || incy == 0 {
+    // Test the input parameters. A is row-major, so the row stride must span a
+    // full row of n elements; requiring lda >= m (the Fortran rule) would
+    // silently reject every tall matrix, which is the common shape here.
+    if m < 0 || n < 0 || lda < max(1, n) || incx == 0 || incy == 0 {
         return  // Would call XERBLA in Fortran
     }
 
@@ -185,8 +188,10 @@ dgemv :: proc(
 // non-unit, upper or lower triangular matrix.
 // Translated from Reference BLAS dtrsv.f
 //
-// Note: This routine assumes column-major storage (Fortran style).
-// For row-major (C style), we need to swap Upper/Lower and transpose logic.
+// A is row-major with row stride lda >= n; element (i,j) is a[i*lda + j].
+// The Fortran algorithm carries over unchanged because it is written in terms
+// of A(i,j) rather than in terms of the storage order -- only the memory
+// access pattern differs, not the arithmetic.
 dtrsv :: proc(
     uplo: Uplo,
     trans: Transpose,
@@ -350,7 +355,7 @@ dtrsv :: proc(
 
 // dger performs the rank 1 operation A := alpha*x*y**T + A
 // where alpha is a scalar, x is an m element vector, y is an n element
-// vector and A is an m by n matrix.
+// vector and A is an m by n matrix stored row-major with row stride lda >= n.
 dger :: proc(
     m: int,
     n: int,
@@ -364,8 +369,9 @@ dger :: proc(
 ) {
     ZERO :: 0.0
 
-    // Test the input parameters
-    if m < 0 || n < 0 || lda < max(1, m) || incx == 0 || incy == 0 {
+    // Test the input parameters. See dgemv: row-major storage means the
+    // stride bound is n, not m.
+    if m < 0 || n < 0 || lda < max(1, n) || incx == 0 || incy == 0 {
         return
     }
 

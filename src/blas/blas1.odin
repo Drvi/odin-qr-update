@@ -174,6 +174,24 @@ ddot :: proc(n: int, x: []f64, incx: int, y: []f64, incy: int) -> f64 {
     return dtemp
 }
 
+// Blue's scaling constants for f64, used by dnrm2.
+//
+// For f64: minexponent = -1021, maxexponent = 1024, digits = 53, radix = 2.
+//
+//    tsml = radix ^ ceiling((minexponent - 1) * 0.5)     = 2^-511
+//    tbig = radix ^ floor((maxexponent - digits + 1) * 0.5) = 2^486
+//    ssml = radix ^ (-floor((minexponent - digits) * 0.5))  = 2^537
+//    sbig = radix ^ (-ceiling((maxexponent + digits - 1) * 0.5)) = 2^-538
+//
+// These are written as literals rather than derived with pow at run time: the
+// exponent arithmetic is easy to get wrong (a sign slip here silently turns
+// dnrm2 into a routine that flushes small vectors to zero), and they are
+// needed on every call. blas_test_dnrm2_constants verifies them.
+NRM2_TSML :: 1.4916681462400413e-154 // 2^-511
+NRM2_TBIG :: 1.997919072202235e+146 // 2^486
+NRM2_SSML :: 4.4989137945431964e+161 // 2^537
+NRM2_SBIG :: 1.1113793747425387e-162 // 2^-538
+
 // dnrm2 computes the Euclidean norm of a vector.
 // Translated from Reference BLAS dnrm2.f90
 // Uses Blue's scaling algorithm for numerical stability
@@ -185,24 +203,10 @@ dnrm2 :: proc(n: int, x: []f64, incx: int) -> f64 {
         return ZERO
     }
 
-    // Blue's scaling constants for f64
-    // These prevent overflow and underflow
-    RADIX :: 2.0  // Base of floating point
-
-    // For f64: minexponent = -1021, maxexponent = 1024, digits = 53
-    MIN_EXP :: -1021
-    MAX_EXP :: 1024
-    DIGITS :: 53
-
-    // tsml = RADIX ^ ceiling((minexponent - 1) * 0.5)
-    // tbig = RADIX ^ floor((maxexponent - digits + 1) * 0.5)
-    // ssml = RADIX ^ (-floor((minexponent - digits) * 0.5))
-    // sbig = RADIX ^ (-ceiling((maxexponent + digits - 1) * 0.5))
-
-    tsml := math.pow_f64(RADIX, f64((-MIN_EXP - 1 + 1) / 2))  // ~1.49e-154
-    tbig := math.pow_f64(RADIX, f64((MAX_EXP - DIGITS + 1) / 2))  // ~1.99e+146
-    ssml := math.pow_f64(RADIX, f64(-(-MIN_EXP - DIGITS) / 2))  // ~4.47e+161
-    sbig := math.pow_f64(RADIX, f64(-(MAX_EXP + DIGITS - 1 + 1) / 2))  // ~1.12e-162
+    tsml :: NRM2_TSML
+    tbig :: NRM2_TBIG
+    ssml :: NRM2_SSML
+    sbig :: NRM2_SBIG
 
     // Compute the sum of squares in 3 accumulators:
     // abig -- sums of squares scaled down to avoid overflow

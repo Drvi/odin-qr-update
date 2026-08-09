@@ -1,7 +1,5 @@
 package blas
 
-import "core:math"
-
 // ============================================================================
 // QR Factorization Updating Routines
 // Based on "Updating the QR factorization and the least squares problem"
@@ -179,12 +177,8 @@ delcolsq :: proc(m: int, n: int, k: int, p: int, q: []f64, ldq: int, r: []f64, l
         }
 
         // Apply rotation to Q (columns j and j+1 of Q)
-        // Q' = Q * G^T means we rotate columns j and j+1 of Q
-        col_j_start := j
-        col_j1_start := j + 1
-        // Q is stored in row-major, so columns are at stride ldq
-        // For column j: elements are at q[0*ldq+j], q[1*ldq+j], ...
-        // We need to apply rotation to columns j and j+1
+        // Q' = Q * G^T means we rotate columns j and j+1 of Q.
+        // Q is row-major, so column j is q[i*ldq + j] walked with stride ldq.
         for i in 0 ..< m {
             temp := c * q[i * ldq + j] + s * q[i * ldq + j + 1]
             q[i * ldq + j + 1] = c * q[i * ldq + j + 1] - s * q[i * ldq + j]

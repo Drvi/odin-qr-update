@@ -13,6 +13,34 @@ SAFMIN :: 2.2250738585072014e-308  // Smallest normalized positive number
 SAFMAX :: 4.4942328371557898e+307  // 1/SAFMIN (approximately)
 EPS :: 2.2204460492503131e-16      // Machine epsilon
 
+// dlapy2 returns sqrt(x**2 + y**2) without overflow or destructive underflow
+// for intermediate values. Translated from Reference LAPACK dlapy2.f.
+//
+// Squaring the arguments directly overflows to Inf once |x| exceeds about
+// 1.3e154, which is well inside the range of values a well-scaled f64 problem
+// can legitimately contain.
+dlapy2 :: proc(x: f64, y: f64) -> f64 {
+    xabs := abs(x)
+    yabs := abs(y)
+
+    // NaN propagates rather than being swallowed by the max/min below.
+    if xabs != xabs {
+        return xabs
+    }
+    if yabs != yabs {
+        return yabs
+    }
+
+    w := max(xabs, yabs)
+    z := min(xabs, yabs)
+
+    if z == 0.0 {
+        return w
+    }
+    ratio := z / w
+    return w * math.sqrt_f64(1.0 + ratio * ratio)
+}
+
 // dlartg generates a plane rotation with real cosine and real sine.
 //
 // Given the Cartesian coordinates (f, g) of a point, this routine computes
@@ -159,7 +187,7 @@ dlarfg :: proc(n: int, alpha_in: f64, x: []f64, incx: int) -> (beta: f64, tau: f
     }
 
     // General case
-    beta = -math.copy_sign_f64(math.sqrt_f64(alpha * alpha + xnorm * xnorm), alpha)
+    beta = -math.copy_sign_f64(dlapy2(alpha, xnorm), alpha)
 
     // Scale if beta is too small
     safmin := SAFMIN / EPS
@@ -176,7 +204,7 @@ dlarfg :: proc(n: int, alpha_in: f64, x: []f64, incx: int) -> (beta: f64, tau: f
         }
         // New beta is at most 1, at least safmin
         xnorm = dnrm2(n - 1, x, incx)
-        beta = -math.copy_sign_f64(math.sqrt_f64(alpha * alpha + xnorm * xnorm), alpha)
+        beta = -math.copy_sign_f64(dlapy2(alpha, xnorm), alpha)
     }
 
     tau = (beta - alpha) / beta
