@@ -156,17 +156,43 @@ every `m` above. Against `n`, holding `m` fixed:
 
 ## Measurement: does chunking across frames cost anything?
 
-`m = 1 000 000`, `n = 5`, same total work split into different batch sizes:
+`m = 1 000 000`, `n = 5`, same total work split into different batch sizes.
+Seven trials each; the spread matters here because the effect is small.
 
-| rows per batch | total ms |
-|---|---|
-| 1 | 114.637 |
-| 64 | 110.612 |
-| 4 096 | 110.598 |
-| 1 000 000 | 110.654 |
+| rows per batch | min ms | median ms | max ms | vs baseline (min) |
+|---|---|---|---|---|
+| 1 | 114.50 | 115.31 | 116.60 | +3.5% |
+| 2 | 113.33 | 114.30 | 115.38 | +2.4% |
+| 8 | 111.47 | 112.26 | 114.15 | +0.8% |
+| 64 | 110.62 | 110.99 | 112.25 | — |
+| 512 | 110.70 | 111.11 | 111.67 | — |
+| 4 096 | 110.75 | 111.44 | 112.72 | — |
+| 1 000 000 | 110.80 | 111.95 | 114.95 | — |
 
-Chunking is free above a batch of ~64, and costs 3.6% even in the degenerate
-one-row-per-call case. This is what justifies having no step function or phase
+Run-to-run spread is 1-2% (batch=all alone ranged 110.80 to 114.95), so only
+the batch=1 point is clearly outside the noise; the batch=2 and batch=8
+excesses sit inside it. The conclusion rests on the monotone trend in the
+minima, not on individual decimals. An earlier version of this table quoted
+single runs to five significant figures, which implied a resolution the
+measurement does not have.
+
+Chunking is free above a batch of ~64, and costs 3.5% even in the degenerate
+one-row-per-call case.
+
+**Where the batch=1 cost comes from.** Not function-call overhead: one million
+null calls (`count = 0`, identical call site and slicing, return value consumed
+so the loop is not eliminated) cost **0.12 ns per call**, about 3% of the
+3.7 ns/row gap. The call, the argument validation and the slice construction
+are all essentially free.
+
+The remaining ~3.6 ns/row is the batch loop losing cross-row optimisation. At
+`count = 1` every call reloads `acc.n`, `acc.ld` and the pointer/length pairs
+for `acc.tri` and `acc.row` from the struct, and stores `acc.nrows` back each
+row; across a large batch those stay in registers and `nrows` is written once.
+Six-ish extra L1 loads plus a store-forward is ~6 cycles, or ~2 ns at 2.8 GHz,
+which is the right order. That attribution is inference consistent with the
+measurement, not an isolated result — unlike the call-overhead figure, which
+was measured and ruled out. This is what justifies having no step function or phase
 machine: the caller can pick any batch size that fits their budget and pay
 nothing for the choice.
 
