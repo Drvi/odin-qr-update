@@ -148,6 +148,41 @@ state object, and no step function: per-row cost is uniform and the final
 solve is `O(n^2)`, so the caller's own loop is the state machine. This is the
 main thing the simplification pass removed — see §5.
 
+### Transform C — model iteration (added after the use case was clarified)
+
+The dominant operation is not a single solve. It is *fit, tweak, re-fit*:
+experimenting with which predictors and which observations. The waste to remove
+is re-reading the `m` rows for every candidate. Two properties of the triangle
+make that avoidable, because `T'T = A'A` for `A = [X | y]`:
+
+1. Selecting columns commutes with the Gram product, so the `R` factor of any
+   subset of the predictors is derivable from the triangle alone.
+2. The `p+1` rows of the triangle span the same row space as the data behind
+   them, so triangles over disjoint row sets combine by folding one into the
+   other.
+
+<!-- -->
+
+    ols_accum_select : (superset tri, keep[k]) -> sub-model tri   [O(p*k^2)]
+    ols_accum_merge  : (tri_a, tri_b)          -> tri_a+b         [O(p^3)]
+
+Both are **independent of m**: they read only the `(p+1)^2` triangle. The
+intended pattern is therefore *decide the candidate predictors up front,
+accumulate all of them once, then subset freely* — which is also why there is
+no "add a predictor" operation. Adding one genuinely needs the data, whereas
+selecting from a superset does not, so the superset is accumulated once and the
+question never arises.
+
+Merge covers the other axis: accumulate one triangle per data segment, then any
+union of segments is `O(p^3)`.
+
+`ols_accum_merge` requires the two row sets to be **disjoint**. Overlap
+double-counts silently and cannot be detected from the triangles, so it is the
+caller's invariant, stated in the contract.
+
+Removing observations is *not* supported; see
+`issues/006-downdating-observations.md`.
+
 ### Boundary policy (explicit, at every input)
 
 | Condition | Policy |

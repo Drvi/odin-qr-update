@@ -47,6 +47,15 @@ rng_normal :: proc(r: ^RNG) -> f64 {
 	return math.sqrt_f64(-2.0 * math.ln_f64(u1)) * math.cos_f64(2.0 * math.PI * u2)
 }
 
+// Right-pad to a column width. Numeric width specifiers are avoided here:
+// in this Odin version "%-6d" pads with '0' rather than ' ', so 20 renders as
+// "200000". Stringify first, pad as a string.
+pad :: proc(s: string, w: int) -> string {
+	if len(s) >= w {return s}
+	spaces := "                                        "
+	return fmt.tprintf("%s%s", s, spaces[:min(w - len(s), len(spaces))])
+}
+
 BETA_TRUE := [N]f64{1.5, -0.8, 2.25, 0.4}
 
 // One observation: intercept, then N-1 predictors, and the response.
@@ -66,14 +75,14 @@ report :: proc(label: string, acc: ^blas.Ols_Accum) {
 	beta: [N]f64
 	err := blas.ols_accum_solve(acc, beta[:])
 	if err != .None {
-		fmt.printf("  %-22s %v\n", label, err)
+		fmt.printf("  %s %v\n", pad(label, 22), err)
 		return
 	}
 	rss := blas.ols_accum_rss(acc)
-	fmt.printf("  %-22s beta = [", label)
+	fmt.printf("  %s beta = [", pad(label, 22))
 	for j in 0 ..< N {
 		if j > 0 {fmt.printf(", ")}
-		fmt.printf("%7.4f", beta[j])
+		fmt.printf("%s", pad(fmt.tprintf("%.4f", beta[j]), 8))
 	}
 	// RSS over nrows observations; sqrt(RSS/nrows) is the typical residual.
 	fmt.printf("]  rms = %.4f\n", math.sqrt_f64(rss / f64(acc.nrows)))
@@ -154,7 +163,7 @@ chunked_across_frames :: proc() {
 		frame += 1
 
 		progress := f64(acc.nrows) / f64(M)
-		fmt.printf("  frame %2d  %5.1f%%  ", frame, progress * 100)
+		fmt.printf("  frame %s  %s%%  ", pad(fmt.tprintf("%d", frame), 2), pad(fmt.tprintf("%.1f", progress * 100), 5))
 		bars := int(progress * 20)
 		for i in 0 ..< 20 {
 			fmt.printf(i < bars ? "#" : ".")
@@ -166,7 +175,7 @@ chunked_across_frames :: proc() {
 	fmt.printf("  true                   beta = [")
 	for j in 0 ..< N {
 		if j > 0 {fmt.printf(", ")}
-		fmt.printf("%7.4f", BETA_TRUE[j])
+		fmt.printf("%s", pad(fmt.tprintf("%.4f", BETA_TRUE[j]), 8))
 	}
 	fmt.println("]")
 	fmt.println()

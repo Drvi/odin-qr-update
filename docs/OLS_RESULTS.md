@@ -193,6 +193,48 @@ An earlier version of that example carried `MEASURED_ROWS_PER_SEC ::
 8_800_000.0` taken from this machine. That was the wrong shape of solution and
 has been removed.
 
+## Measurement: model iteration
+
+The intended use is experimentation — trying predictors against data, both
+changing. The waste to remove is re-reading the rows for every candidate.
+
+Scoring every non-empty subset of `p = 10` candidate predictors (1023 models).
+"naive" gathers the subset's columns and re-accumulates all `m` rows each time;
+"cached" accumulates the 10-predictor triangle once and then calls
+`ols_accum_select` per subset. Both give the same coefficients — the
+`select == direct fit` test asserts it:
+
+| m | naive | cached | speedup |
+|---|---|---|---|
+| 1 000 | 119.9 ms | 0.866 ms | 139x |
+| 10 000 | 1 218 ms | 2.815 ms | 433x |
+| 100 000 | 8 117 ms | 23.0 ms | 353x |
+| 1 000 000 | 88 946 ms | 224.6 ms | 396x |
+
+(naive at `m >= 100 000` extrapolated from a 64-subset sample; the full run
+takes minutes.)
+
+The totals understate it, because nearly all of "cached" is the one
+accumulation pass. Isolating the per-operation cost:
+
+| p | `ols_accum_select` | `ols_accum_merge` |
+|---|---|---|
+| 4 | 0.119 us | 0.133 us |
+| 8 | 0.346 us | 0.403 us |
+| 12 | 0.747 us | 0.636 us |
+| 16 | 1.290 us | 1.109 us |
+| 24 | 2.758 us | 2.283 us |
+
+So at `m = 1 000 000`, `p = 10`: the first model costs one pass (~220 ms), and
+**every model after it costs about 0.5 us instead of 87 ms** — a marginal
+improvement of roughly 170 000x. Both operations read only the `(p+1)^2`
+triangle, so their cost depends on `p` alone and not on `m`; that is by
+construction rather than by measurement, since neither routine touches the
+data.
+
+This is what makes exhaustive search practical: 1023 models at `m = 1 000 000`
+in 0.5 ms of marginal work, against 89 seconds of refitting.
+
 ## Correctness verification
 
 Ground truth is `numpy.linalg.lstsq` (LAPACK) on the repository's own real
@@ -211,7 +253,26 @@ The NaN test also checks recovery: after a batch aborts on row 4, the
 accumulator still holds exactly 4 rows, absorbing the remaining good rows
 succeeds, and the resulting `beta` is finite.
 
-Full suite: 21 tests, 0 failures (13 pre-existing, 8 new).
+Full suite: **29 tests, 0 failures** (13 pre-existing, 16 new).
+
+Tests added for model iteration and for gaps this document previously listed
+as unverified:
+
+| Test | What it pins down |
+|---|---|
+| `select all 31 subsets` | Every non-empty subset of the real 20x5 data, `beta` and `RSS`, against numpy. Catches any error in the select transform for any subset shape. |
+| `select == direct fit` | Selecting from the superset triangle equals gathering those columns from raw data and fitting them, including reordered `keep`. |
+| `merge` | Split/merge equals all-at-once; reverse order agrees; 3-way pairwise agrees; an empty accumulator is an identity element. |
+| `merge then select` | The combined loop, checked against numpy for all 31 subsets. |
+| `select/merge boundaries` | Short `keep`, out-of-range index, negative index, duplicate index, aliasing on both routines, `n` mismatch, widening. Plus: a collinear sub-model reports `.Rank_Deficient` while a good sibling still solves. |
+| `apply_qt vs explicit Q` | The core optimization against the `dorgqr` path it replaced: max difference **8.88e-16**, the factored matrix is restored byte-for-byte, and the norm is preserved. |
+| `conditioning 1e2..1e8` | Both paths against numpy across four condition numbers (table above). |
+| `degenerate shapes` | `n = 1`; `m == n`; exact fits give negligible `RSS`; duplicating every row leaves `beta` unmoved and doubles `RSS`; rows fed in reverse order give the same fit. |
+
+One of these initially failed, and the test was wrong rather than the code: it
+asserted `RSS == 0.0` exactly for an exact fit, but the triangle corner carries
+~8.9e-16 of rounding residue which squares to 7.9e-31. The assertion is now
+relative to `||y||^2`.
 
 ## What was NOT verified
 
@@ -220,10 +281,23 @@ Full suite: 21 tests, 0 failures (13 pre-existing, 8 new).
   `1.0`, remaining columns `~N(0,1)`. If real workloads are differently
   conditioned, the accuracy results may not carry over. This is the weakest
   part of the evidence.
-- **Accuracy was not measured on ill-conditioned input.** `cond = 2.3265` is
-  benign. The Givens accumulator and Householder QR are both backward stable
-  in theory, but the plan's disproof condition — "Transform B materially less
-  accurate than Transform A" — was only tested at low condition numbers.
+- ~~Accuracy was not measured on ill-conditioned input.~~ **Now closed.**
+  `test_ols_conditioning` fits designs built as `U*diag(s)*V^T` with
+  geometrically spaced singular values, giving `cond(X)` of `1e2` to `1e8`, and
+  compares both paths against numpy. Worst relative coefficient error:
+
+  | cond(X) | accumulator | dense | apart |
+  |---|---|---|---|
+  | 1e2 | 2.22e-15 | 1.33e-15 | 3.55e-15 |
+  | 1e4 | 2.71e-13 | 6.75e-14 | 2.03e-13 |
+  | 1e6 | 3.81e-11 | 2.75e-12 | 3.53e-11 |
+  | 1e8 | 2.80e-08 | 1.60e-07 | 1.32e-07 |
+
+  Both track the `cond(X) * eps` bound expected of a backward-stable solver.
+  **The plan's disproof condition is refuted:** the Givens accumulator is not
+  materially less accurate than Householder QR, and at `cond = 1e8` it is
+  actually the better of the two. Still untested above `1e8`, where the
+  `rcond` rank check starts rejecting.
 - **Nothing was measured on representative target hardware.** Every figure
   comes from one server-class container — 33 MiB L3, AVX-512, 4 vCPU — with a
   single run per configuration and no variance reported. The old-path timings

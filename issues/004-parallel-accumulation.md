@@ -1,11 +1,14 @@
 # 004 — Parallel accumulation by merging triangles
 
-Two `Ols_Accum` over disjoint row ranges can be merged by absorbing the `n+1`
-rows of one triangle into the other, because the triangle is itself a valid
-set of rows spanning the same row space. That makes row-parallel OLS trivial:
-partition rows, accumulate independently with no shared state, merge pairwise.
-Merge cost is `O(n^3)`, negligible against `O(m*n^2)`.
+**The mechanism now exists.** `ols_accum_merge` was added for data
+experimentation (combining separately collected segments), and row-parallel
+OLS is the same operation: partition the rows, accumulate each partition into
+its own triangle with no shared state and no locks, then merge pairwise.
 
-Not implemented: unmeasured. At the measured per-row cost the single-threaded
-accumulator already handles large `m` well inside a frame, so there is no
-demonstrated need. Verify with a measurement before building it.
+Measured merge cost is 0.4-2.3 us for p = 8..24, against O(m*p^2) for the
+accumulation itself, so the merge is free at any m worth parallelising.
+
+Still not done: the threading itself. No measurement has been taken showing a
+single thread is insufficient for a real workload, and the survey's modal
+machine has 6-8 cores that a game is already using for other things. Build it
+when a measurement demands it, not before.

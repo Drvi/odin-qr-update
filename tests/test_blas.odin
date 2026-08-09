@@ -615,6 +615,21 @@ main :: proc() {
         {"chunk invariance", test_ols_accum_chunk_invariance},
         {"transforms agree", test_ols_transforms_agree},
         {"boundary policies", test_ols_boundaries},
+        {"apply_qt vs explicit Q", test_ols_apply_qt_vs_explicit_q},
+        {"conditioning 1e2..1e8", test_ols_conditioning},
+        {"degenerate shapes", test_ols_degenerate_shapes},
+    }) {
+        if t.fn() {passed += 1} else {failed += 1}
+    }
+
+    // Model iteration: experiment without re-reading the data
+    fmt.println("\n--- Model iteration ---")
+    for t in ([]Test {
+        {"select all 31 subsets", test_ols_select_all_subsets},
+        {"select == direct fit", test_ols_select_matches_direct},
+        {"merge", test_ols_merge},
+        {"merge then select", test_ols_merge_then_select},
+        {"select/merge boundaries", test_ols_iteration_boundaries},
     }) {
         if t.fn() {passed += 1} else {failed += 1}
     }

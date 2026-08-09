@@ -390,6 +390,122 @@ ols_accum_solve :: proc(
 	return .None
 }
 
+// ============================================================================
+// Iterating on the model without re-reading the data
+// ============================================================================
+//
+// The triangle is a complete summary of the fit: T'T = A'A for A = [X | y].
+// Two consequences, and they are what make model experimentation cheap.
+//
+//   1. Selecting columns commutes with the Gram product, so the R factor of any
+//      SUBSET of the predictors can be built from the triangle alone --
+//      ols_accum_select. Accumulate every candidate predictor once, then every
+//      sub-model costs O(p*k^2) and never touches the m rows again.
+//
+//   2. The p+1 rows of the triangle span the same row space as the data that
+//      produced them, so two triangles over disjoint row sets combine by
+//      folding one into the other -- ols_accum_merge. Accumulate per data
+//      segment once, then any union of segments costs O(p^3).
+//
+// Together those cover both axes of "fit the right model to the right data":
+// which predictors, and which observations. Every experiment after the first
+// pass is independent of m.
+
+// ols_accum_select builds the sub-model over `keep` from a superset fit.
+//
+// BATCH CONTRACT
+//   dst   out  accumulator with dst.n == len(keep). Reset and overwritten.
+//              Must not alias src.
+//   src   in   the superset fit. Not modified.
+//   keep  in   src-predictor indices to retain, each in [0, src.n), no
+//              duplicates. Order is free, so this also reorders predictors.
+//              Column i of the sub-model is column keep[i] of the superset.
+//
+// dst.nrows is set to src.nrows: the sub-model sees the same observations,
+// just fewer predictors. dst's RSS is the sub-model's RSS, so candidate models
+// can be ranked straight out of ols_accum_rss with no further work.
+//
+// Cost: (src.n + 1) row folds into a (k+1) triangle, so O(src.n * k^2) --
+// INDEPENDENT OF m. Re-accumulating the sub-model from raw data instead costs
+// O(m * k^2), so this is cheaper by a factor of about m / src.n.
+ols_accum_select :: proc(dst: ^Ols_Accum, src: ^Ols_Accum, keep: []int) -> Ols_Error {
+	if dst.n < 1 || src.n < 1 {
+		return .Invalid_Dimension
+	}
+	if len(keep) != dst.n || dst.n > src.n {
+		return .Invalid_Dimension
+	}
+	// Aliasing would corrupt src as dst is reset and rewritten.
+	if raw_data(dst.tri) == raw_data(src.tri) {
+		return .Invalid_Dimension
+	}
+	// Duplicates would produce an exactly singular sub-model, which is a
+	// caller mistake rather than a property of the data. Reject it here so it
+	// is not mistaken for .Rank_Deficient later. O(k^2) on a small k.
+	for a in 0 ..< len(keep) {
+		if keep[a] < 0 || keep[a] >= src.n {
+			return .Invalid_Dimension
+		}
+		for b in a + 1 ..< len(keep) {
+			if keep[a] == keep[b] {
+				return .Invalid_Dimension
+			}
+		}
+	}
+
+	ols_accum_reset(dst)
+
+	// Each row of the source triangle, restricted to the kept columns plus the
+	// response, is a valid pseudo-observation for the sub-model.
+	for i in 0 ..< src.n + 1 {
+		base := i * src.ld
+		for j in 0 ..< dst.n {
+			dst.row[j] = src.tri[base + keep[j]]
+		}
+		dst.row[dst.n] = src.tri[base + src.n]
+		ols_absorb_row(dst.tri, dst.ld, dst.row, dst.n)
+	}
+
+	dst.nrows = src.nrows
+	return .None
+}
+
+// ols_accum_merge folds src into dst, giving the fit over both row sets.
+//
+//   dst  in/out  accumulator; must have the same n as src. Must not alias src.
+//   src  in      not modified.
+//
+// The two accumulators must cover DISJOINT observations -- merging overlapping
+// sets double-counts the shared rows, silently and without any way to detect
+// it here. dst.nrows becomes the sum.
+//
+// Cost: (n+1) row folds, so O(n^3), independent of how many rows either side
+// absorbed. Merging is exact, not an approximation: the result matches
+// accumulating every row into one accumulator, up to rotation ordering.
+//
+// This is what makes data experimentation cheap. Accumulate one triangle per
+// segment -- per level, per session, per cohort -- and any union of segments
+// costs O(n^3) instead of a fresh pass over the rows.
+ols_accum_merge :: proc(dst: ^Ols_Accum, src: ^Ols_Accum) -> Ols_Error {
+	if dst.n < 1 || dst.n != src.n {
+		return .Invalid_Dimension
+	}
+	if raw_data(dst.tri) == raw_data(src.tri) {
+		return .Invalid_Dimension
+	}
+
+	for i in 0 ..< src.n + 1 {
+		base := i * src.ld
+		for j in 0 ..< src.n + 1 {
+			dst.row[j] = src.tri[base + j]
+		}
+		ols_absorb_row(dst.tri, dst.ld, dst.row, dst.n)
+	}
+
+	dst.nrows += src.nrows
+	return .None
+}
+
 // ols_accum_rss returns ||X*beta - y||^2 over the rows absorbed so far.
 //
 // Free: the augmented factorization leaves the residual norm sitting on
