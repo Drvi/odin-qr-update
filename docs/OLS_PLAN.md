@@ -180,8 +180,23 @@ union of segments is `O(p^3)`.
 double-counts silently and cannot be detected from the triangles, so it is the
 caller's invariant, stated in the contract.
 
-Removing observations is *not* supported; see
+Removing observations is *not* supported cheaply; see
 `issues/006-downdating-observations.md`.
+
+**The fused pass.** When an edit forces a data pass anyway — a new predictor,
+or removed observations — `ols_accum_rows_gather` does column selection, row
+exclusion and accumulation in that one pass, so combining all of them costs no
+more than the cheapest alone. Measured: 1.0% over the specialised
+`ols_accum_rows`, and 8% *faster* than compacting the wanted columns into a
+staging table first. Absolute row indexing keeps the exclusion list valid
+across chunks.
+
+There is deliberately **no single entry point taking all four edit lists**. Two
+of the four are answerable from the triangle at `O(p*k^2)` and two force
+`O(m*k^2)`; measured, that is 0.0004 ms against 224 ms at `m = 1e6`. One
+signature spanning a 500,000x cost range, with nothing at the call site
+indicating which you get, would make a frame budget unpredictable. Callers pick
+the path; the cost table in `lstsq.odin` says which one applies.
 
 **No model selection.** These are mechanisms, not policy. The library reports
 `beta` and `RSS` for whatever model is asked for and never ranks, scores, or

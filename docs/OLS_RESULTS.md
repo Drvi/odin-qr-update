@@ -267,6 +267,50 @@ What this buys is interactivity. At 0.5 us per model, a person can try
 hypotheses as fast as they can think of them, on a dataset of any size,
 including inside a frame.
 
+## Measurement: the general one-pass update
+
+The question this answers: can one utility take "drop these rows, drop these
+columns, add these rows, add these columns" and still be fast and chunkable?
+
+Partly. The four edits are not in the same cost class. Dropping predictors and
+adding observations are answerable from the triangle alone. Adding a predictor
+needs `X'z` against every retained row, which the triangle does not contain,
+and dropping observations would need downdating. So those two force a pass over
+the data — and once a pass is unavoidable, all four can ride along in it.
+
+`ols_accum_rows_gather` is that fused pass. `m = 1 000 000`, `p = 10`, min of 7:
+
+| | ms |
+|---|---|
+| `ols_accum_rows` (specialised, no gather) | 221.66 |
+| gather, identity columns, no exclusions | 223.92 |
+| gather + 1 000 row exclusions | 219.72 |
+| gather, 5 of 10 columns (strided) | 113.28 |
+| physically compact 5 columns into a new table, then fit | 122.79 |
+| `ols_accum_select` x1000, from the cached triangle | **0.4344** |
+
+Three things follow.
+
+**The generality costs 1.0%.** Column indirection and the exclusion compare add
+2.3 ms to a 221.7 ms pass. Row exclusion is *negative* cost — 1 000 fewer rows
+absorbed more than pays for the compare.
+
+**Gathering beats staging.** Selecting 5 of 10 columns during the pass is 8%
+faster than compacting them into a fresh table first, and avoids the 40 MB
+buffer that compaction needs.
+
+**But it is still a different cost class.** 223.92 ms against 0.0004 ms is a
+factor of ~500 000. That gap is exactly why there is no single entry point
+taking all four edit lists: the same call would cost either half a microsecond
+or a quarter of a second depending on which arguments happened to be non-empty,
+with nothing at the call site to say which. Callers pick the path, and the cost
+table above `ols_accum_select` in `lstsq.odin` says how.
+
+Chunking works on the expensive path too. `drop_rows` and `first` are absolute
+row indices, so the exclusion list is reused unchanged across chunks and the
+cursor is re-established per call by binary search. Verified bit-identical
+across chunk sizes 1, 3, 7 and all-at-once.
+
 ## Correctness verification
 
 Ground truth is `numpy.linalg.lstsq` (LAPACK) on the repository's own real
@@ -285,7 +329,7 @@ The NaN test also checks recovery: after a batch aborts on row 4, the
 accumulator still holds exactly 4 rows, absorbing the remaining good rows
 succeeds, and the resulting `beta` is finite.
 
-Full suite: **30 tests, 0 failures** (13 pre-existing, 17 new).
+Full suite: **34 tests, 0 failures** (13 pre-existing, 21 new).
 
 ### The library allocates nothing
 
@@ -353,6 +397,10 @@ as unverified:
 | `apply_qt vs explicit Q` | The core optimization against the `dorgqr` path it replaced: max difference **8.88e-16**, the factored matrix is restored byte-for-byte, and the norm is preserved. |
 | `conditioning 1e2..1e8` | Both paths against numpy across four condition numbers (table above). |
 | `degenerate shapes` | `n = 1`; `m == n`; exact fits give negligible `RSS`; duplicating every row leaves `beta` unmoved and doubles `RSS`; rows fed in reverse order give the same fit. |
+| `gather == plain` | Identity columns and no exclusions reproduce `ols_accum_rows` **bit for bit**. |
+| `gather column subsets` | All 31 subsets built by a data pass, against numpy — the other route to the same answers as `select`. |
+| `gather row exclusion` | Excluding rows mid-stream is bit-identical to never presenting them, across chunk sizes 1/3/7/all with one shared absolute exclusion list. |
+| `gather boundaries` | Short/out-of-range/duplicate `cols`, negative `first`/`count`, table overrun, `count == 0`, unsorted and duplicated `drop_rows`, NaN aborting cleanly — plus a NaN in an *unselected* column correctly being invisible. |
 
 One of these initially failed, and the test was wrong rather than the code: it
 asserted `RSS == 0.0` exactly for an exact fit, but the triangle corner carries

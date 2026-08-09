@@ -631,6 +631,10 @@ main :: proc() {
         {"merge", test_ols_merge},
         {"merge then select", test_ols_merge_then_select},
         {"select/merge boundaries", test_ols_iteration_boundaries},
+        {"gather == plain", test_ols_gather_equals_plain},
+        {"gather column subsets", test_ols_gather_column_subset},
+        {"gather row exclusion", test_ols_gather_row_exclusion},
+        {"gather boundaries", test_ols_gather_boundaries},
     }) {
         if t.fn() {passed += 1} else {failed += 1}
     }

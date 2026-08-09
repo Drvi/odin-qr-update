@@ -394,6 +394,24 @@ ols_accum_solve :: proc "contextless" (
 // Iterating on the model without re-reading the data
 // ============================================================================
 //
+// WHAT IS CHEAP AND WHAT IS NOT. The triangle satisfies T'T = A'A, which fixes
+// exactly which edits it can answer on its own:
+//
+//   drop predictors   O(p*k^2), no data      ols_accum_select
+//   add observations  O(n^2) per row         ols_accum_rows
+//   add predictors    O(m*k) MINIMUM         needs a pass: ols_accum_rows_gather
+//   drop observations not safely cheap       needs a pass, see issues/006
+//
+// Adding a predictor z requires X'z against every retained row, and those rows
+// are not in the triangle. Dropping observations would need downdating, whose
+// failure mode is silent. So the first two are answerable from the summary and
+// the last two are not -- a difference of about five orders of magnitude at
+// m = 1e6, which is why there is no single "apply all four changes" entry point
+// that would hide it.
+//
+// When a pass IS required, ols_accum_rows_gather does all four in that one
+// pass, so the extra edits ride along free.
+//
 // The triangle is a complete summary of the fit: T'T = A'A for A = [X | y].
 // Two consequences, and they are what make model experimentation cheap.
 //
@@ -504,6 +522,133 @@ ols_accum_merge :: proc "contextless" (dst: ^Ols_Accum, src: ^Ols_Accum) -> Ols_
 
 	dst.nrows += src.nrows
 	return .None
+}
+
+// ols_accum_rows_gather folds a chunk of rows, taking only the listed source
+// columns and skipping listed rows.
+//
+// This is the general form of ols_accum_rows, for the changes that cannot be
+// served from a cached triangle. Use it when a model gains a predictor the
+// triangle never saw, or loses observations -- see the cost table above
+// ols_accum_select. When it applies, it does column selection, row exclusion
+// and accumulation in ONE streaming pass, so combining all of them costs no
+// more than the cheapest of them alone.
+//
+// BATCH CONTRACT
+//   acc       in/out  accumulator with acc.n == len(cols).
+//   x, ldx    in      the WHOLE source table, row-major, row stride ldx.
+//                     Read only. Indices below are absolute rows of this table,
+//                     not of the chunk, so drop_rows stays valid across chunks.
+//   y         in      f64[>= first+count], indexed absolutely. Read only.
+//   first     in      absolute index of the first row of this chunk, >= 0.
+//   count     in      rows in this chunk, >= 0. count == 0 is a no-op.
+//   cols      in      source column indices, each in [0, ldx), no duplicates.
+//                     Predictor j of the model is source column cols[j]; order
+//                     is free, so this reorders as well as selects.
+//   drop_rows in      absolute row indices to skip, SORTED ASCENDING. May be
+//                     empty. Monotonicity is checked as the list is consumed;
+//                     an out-of-order entry is rejected rather than silently
+//                     skipping the wrong row.
+//   returns           rows absorbed (skipped rows do not count), and an error.
+//
+// Chunking: call repeatedly with advancing `first`, same `cols` and
+// `drop_rows`. The cursor into drop_rows is re-established per call by binary
+// search, so chunks may be any size and need not align to anything.
+//
+// Cost: one pass, 3n(n+1) per surviving row plus one indirection per element
+// and one compare per row. Measured against the non-gathering path in
+// docs/OLS_RESULTS.md.
+ols_accum_rows_gather :: proc "contextless" (
+	acc: ^Ols_Accum,
+	x: []f64,
+	ldx: int,
+	y: []f64,
+	first: int,
+	count: int,
+	cols: []int,
+	drop_rows: []int,
+) -> (
+	absorbed: int,
+	err: Ols_Error,
+) {
+	n := acc.n
+	if n < 1 || count < 0 || first < 0 || ldx < 1 {
+		return 0, .Invalid_Dimension
+	}
+	if len(cols) != n {
+		return 0, .Invalid_Dimension
+	}
+	if count == 0 {
+		return 0, .None
+	}
+
+	// Column indices must be in range and distinct: a repeated column is an
+	// exactly singular model, which is a caller mistake rather than a property
+	// of the data, so it is rejected here instead of surfacing later as
+	// .Rank_Deficient. O(n^2) once per call, not per row.
+	maxc := 0
+	for a in 0 ..< n {
+		if cols[a] < 0 || cols[a] >= ldx {
+			return 0, .Invalid_Dimension
+		}
+		maxc = max(maxc, cols[a])
+		for b in a + 1 ..< n {
+			if cols[a] == cols[b] {
+				return 0, .Invalid_Dimension
+			}
+		}
+	}
+	last := first + count - 1
+	if len(y) < first + count || len(x) < last * ldx + maxc + 1 {
+		return 0, .Invalid_Dimension
+	}
+
+	// Find the first exclusion at or after `first`. Binary search so that a
+	// caller chunking a large table does not rescan the whole list every call.
+	d := 0
+	{
+		lo, hi := 0, len(drop_rows)
+		for lo < hi {
+			mid := lo + (hi - lo) / 2
+			if drop_rows[mid] < first {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		d = lo
+	}
+
+	for i in first ..= last {
+		// Monotone merge against the exclusion list: one compare per row, and
+		// the ordering precondition is verified as entries are consumed.
+		if d < len(drop_rows) && drop_rows[d] == i {
+			d += 1
+			if d < len(drop_rows) && drop_rows[d] <= i {
+				return absorbed, .Invalid_Dimension
+			}
+			continue
+		}
+
+		base := i * ldx
+		for j in 0 ..< n {
+			v := x[base + cols[j]]
+			if !is_finite(v) {
+				return absorbed, .Non_Finite_Input
+			}
+			acc.row[j] = v
+		}
+		yv := y[i]
+		if !is_finite(yv) {
+			return absorbed, .Non_Finite_Input
+		}
+		acc.row[n] = yv
+
+		ols_absorb_row(acc.tri, acc.ld, acc.row, n)
+		acc.nrows += 1
+		absorbed += 1
+	}
+	return absorbed, .None
 }
 
 // ols_accum_rss returns ||X*beta - y||^2 over the rows absorbed so far.

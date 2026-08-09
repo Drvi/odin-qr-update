@@ -2373,3 +2373,248 @@ test_ols_no_allocation :: proc() -> bool {
 	fmt.println("  PASSED (no allocation reached the allocator)")
 	return true
 }
+
+// ============================================================================
+// ols_accum_rows_gather: the one-pass path for changes the triangle cannot serve
+// ============================================================================
+
+test_ols_gather_equals_plain :: proc() -> bool {
+	fmt.println("Testing gather with identity cols == ols_accum_rows...")
+
+	// With every column selected in order and nothing dropped, the general
+	// path must reproduce the specialised one bit for bit: same rows, same
+	// order, same rotations.
+	a_buf := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(a_buf)
+	b_buf := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(b_buf)
+	plain, gath: blas.Ols_Accum
+	blas.ols_accum_init(&plain, REAL_N, a_buf)
+	blas.ols_accum_init(&gath, REAL_N, b_buf)
+
+	blas.ols_accum_rows(&plain, real_x[:], REAL_N, real_y[:], REAL_M)
+
+	cols := [REAL_N]int{0, 1, 2, 3, 4}
+	got, e := blas.ols_accum_rows_gather(
+		&gath, real_x[:], REAL_N, real_y[:], 0, REAL_M, cols[:], nil,
+	)
+	if e != .None || got != REAL_M {
+		fmt.printf("  FAILED: gather returned %d, %v\n", got, e)
+		return false
+	}
+	for i in 0 ..< len(plain.tri) {
+		if plain.tri[i] != gath.tri[i] {
+			fmt.printf("  FAILED: tri[%d] %.17e vs %.17e\n", i, plain.tri[i], gath.tri[i])
+			return false
+		}
+	}
+	if plain.nrows != gath.nrows {
+		fmt.println("  FAILED: nrows differ")
+		return false
+	}
+	fmt.println("  PASSED (bit-identical)")
+	return true
+}
+
+test_ols_gather_column_subset :: proc() -> bool {
+	fmt.println("Testing gather column subsets against numpy...")
+
+	// Every subset, built by a data pass rather than by select. Both routes
+	// must land on the same numbers the ground truth has.
+	for truth in SUBSET_TRUTH {
+		keep: [REAL_N]int
+		k := 0
+		for i in 0 ..< REAL_N {
+			if truth.mask & (1 << uint(i)) != 0 {keep[k] = i;k += 1}
+		}
+		buf := make([]f64, blas.ols_accum_scratch(k));defer delete(buf)
+		acc: blas.Ols_Accum
+		blas.ols_accum_init(&acc, k, buf)
+		if _, e := blas.ols_accum_rows_gather(
+			&acc, real_x[:], REAL_N, real_y[:], 0, REAL_M, keep[:k], nil,
+		); e != .None {
+			fmt.printf("  FAILED: mask %d -> %v\n", truth.mask, e)
+			return false
+		}
+		beta: [REAL_N]f64
+		if e := blas.ols_accum_solve(&acc, beta[:k]); e != .None {
+			fmt.printf("  FAILED: mask %d solve %v\n", truth.mask, e)
+			return false
+		}
+		for j in 0 ..< k {
+			if abs(beta[j] - truth.beta[j]) > 1e-10 {
+				fmt.printf("  FAILED: mask %d beta[%d] %.17e want %.17e\n",
+					truth.mask, j, beta[j], truth.beta[j])
+				return false
+			}
+		}
+		if abs(blas.ols_accum_rss(&acc) - truth.rss) > 1e-9 * max(1.0, truth.rss) {
+			fmt.printf("  FAILED: mask %d rss\n", truth.mask)
+			return false
+		}
+	}
+	fmt.println("  PASSED")
+	return true
+}
+
+test_ols_gather_row_exclusion :: proc() -> bool {
+	fmt.println("Testing gather row exclusion and chunking...")
+
+	drop := [?]int{0, 3, 4, 11, 19}
+
+	// Reference: physically build the table without those rows.
+	kept := REAL_M - len(drop)
+	rx := make([]f64, kept * REAL_N);defer delete(rx)
+	ry := make([]f64, kept);defer delete(ry)
+	w := 0
+	for i in 0 ..< REAL_M {
+		skip := false
+		for d in drop {
+			if d == i {skip = true;break}
+		}
+		if skip {continue}
+		for j in 0 ..< REAL_N {rx[w * REAL_N + j] = real_x[i * REAL_N + j]}
+		ry[w] = real_y[i]
+		w += 1
+	}
+	ref_buf := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(ref_buf)
+	ref: blas.Ols_Accum
+	blas.ols_accum_init(&ref, REAL_N, ref_buf)
+	blas.ols_accum_rows(&ref, rx, REAL_N, ry, kept)
+	ref_beta: [REAL_N]f64
+	if e := blas.ols_accum_solve(&ref, ref_beta[:]); e != .None {
+		fmt.printf("  FAILED: reference solve %v\n", e)
+		return false
+	}
+
+	cols := [REAL_N]int{0, 1, 2, 3, 4}
+
+	// Same thing via exclusion, at several chunk sizes. Absolute row indices
+	// mean drop_rows is reused unchanged across chunks.
+	for chunk in ([]int{1, 3, 7, REAL_M}) {
+		buf := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(buf)
+		acc: blas.Ols_Accum
+		blas.ols_accum_init(&acc, REAL_N, buf)
+
+		pos := 0
+		for pos < REAL_M {
+			take := min(chunk, REAL_M - pos)
+			if _, e := blas.ols_accum_rows_gather(
+				&acc, real_x[:], REAL_N, real_y[:], pos, take, cols[:], drop[:],
+			); e != .None {
+				fmt.printf("  FAILED: chunk %d -> %v\n", chunk, e)
+				return false
+			}
+			pos += take
+		}
+		if acc.nrows != kept {
+			fmt.printf("  FAILED: chunk %d absorbed %d want %d\n", chunk, acc.nrows, kept)
+			return false
+		}
+		// Excluding rows mid-stream must give exactly the same rotations as
+		// never having presented them.
+		for i in 0 ..< len(ref.tri) {
+			if ref.tri[i] != acc.tri[i] {
+				fmt.printf("  FAILED: chunk %d tri[%d] %.17e vs %.17e\n",
+					chunk, i, ref.tri[i], acc.tri[i])
+				return false
+			}
+		}
+	}
+	fmt.println("  PASSED (bit-identical across chunk sizes 1/3/7/all)")
+	return true
+}
+
+test_ols_gather_boundaries :: proc() -> bool {
+	fmt.println("Testing gather boundary policies...")
+
+	buf := make([]f64, blas.ols_accum_scratch(3));defer delete(buf)
+	acc: blas.Ols_Accum
+	blas.ols_accum_init(&acc, 3, buf)
+	ok := [3]int{0, 2, 4}
+
+	// cols length must equal acc.n
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, 2, []int{0, 1}, nil,
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: short cols -> %v\n", e)
+		return false
+	}
+	// out-of-range and duplicate columns
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, 2, []int{0, 1, REAL_N}, nil,
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: oob col -> %v\n", e)
+		return false
+	}
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, 2, []int{0, 2, 2}, nil,
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: duplicate col -> %v\n", e)
+		return false
+	}
+	// negative first, negative count
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], -1, 2, ok[:], nil,
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: negative first -> %v\n", e)
+		return false
+	}
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, -1, ok[:], nil,
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: negative count -> %v\n", e)
+		return false
+	}
+	// reading past the end of the table
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, REAL_M + 1, ok[:], nil,
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: overrun -> %v\n", e)
+		return false
+	}
+	// count == 0 is a no-op
+	if got, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, 0, ok[:], nil,
+	); e != .None || got != 0 || acc.nrows != 0 {
+		fmt.printf("  FAILED: count=0 -> %d %v\n", got, e)
+		return false
+	}
+	// an unsorted exclusion list is rejected, not silently misapplied
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, REAL_M, ok[:], []int{5, 5},
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: duplicate drop -> %v\n", e)
+		return false
+	}
+	blas.ols_accum_reset(&acc)
+	if _, e := blas.ols_accum_rows_gather(
+		&acc, real_x[:], REAL_N, real_y[:], 0, REAL_M, ok[:], []int{9, 2},
+	); e != .Invalid_Dimension {
+		fmt.printf("  FAILED: unsorted drop -> %v\n", e)
+		return false
+	}
+	// a NaN aborts without poisoning the triangle
+	{
+		bad := real_x
+		blas.ols_accum_reset(&acc)
+		bad[6 * REAL_N + 4] = math.nan_f64() // column 4 is selected by `ok`
+		got, e := blas.ols_accum_rows_gather(
+			&acc, bad[:], REAL_N, real_y[:], 0, REAL_M, ok[:], nil,
+		)
+		if e != .Non_Finite_Input || got != 6 || acc.nrows != 6 {
+			fmt.printf("  FAILED: NaN -> got %d nrows %d %v\n", got, acc.nrows, e)
+			return false
+		}
+		// A NaN in a column that is NOT selected must be invisible.
+		blas.ols_accum_reset(&acc)
+		clean := real_x
+		clean[6 * REAL_N + 1] = math.nan_f64() // column 1 is not in `ok`
+		if got2, e2 := blas.ols_accum_rows_gather(
+			&acc, clean[:], REAL_N, real_y[:], 0, REAL_M, ok[:], nil,
+		); e2 != .None || got2 != REAL_M {
+			fmt.printf("  FAILED: unselected NaN leaked -> %d %v\n", got2, e2)
+			return false
+		}
+	}
+	fmt.println("  PASSED")
+	return true
+}

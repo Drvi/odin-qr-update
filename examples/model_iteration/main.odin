@@ -177,6 +177,47 @@ main :: proc() {
 
 	try(Hypothesis{"intercept + p2 + p5, refitted", {0, 2, 5}}, &full, sub_buf[:])
 
+	// A hypothesis the cached triangle CANNOT answer: a derived predictor that
+	// was never accumulated. Adding a column needs its inner products against
+	// every retained row, and those rows are not in the triangle -- so this one
+	// costs a pass over the data where every hypothesis above cost ~0.5 us.
+	// ols_accum_rows_gather does the pass, and picks the columns and skips
+	// unwanted rows while it is there.
+	fmt.println()
+	fmt.println("--- a predictor the triangle never saw, and two rows dropped ---")
+	fmt.println("  (this one needs a pass over the data; everything above did not)")
+
+	// Materialise the derived column into the spare slot of the table.
+	for i in 0 ..< M0 {
+		x0[i * P + 7] = x0[i * P + 2] * x0[i * P + 5]
+	}
+
+	derived_buf: [(P + 1) * (P + 1) + (P + 1)]f64
+	derived: blas.Ols_Accum
+	blas.ols_accum_init(&derived, 4, derived_buf[:])
+	cols := [4]int{0, 2, 5, 7} // intercept, p2, p5, and p2*p5
+	drop := [2]int{10, 200}    // two observations judged bad
+	if _, e := blas.ols_accum_rows_gather(
+		&derived, x0[:], P, y0[:], 0, M0, cols[:], drop[:],
+	); e != .None {
+		fmt.printf("  gather failed: %v\n", e)
+		return
+	}
+	dbeta: [4]f64
+	if e := blas.ols_accum_solve(&derived, dbeta[:]); e != .None {
+		fmt.printf("  solve failed: %v\n", e)
+		return
+	}
+	fmt.printf("    %d of %d rows used, k = 4\n", derived.nrows, M0)
+	drss := blas.ols_accum_rss(&derived)
+	fmt.printf("    RSS %.4f   residual rms %.5f\n", drss, math.sqrt_f64(drss / f64(derived.nrows)))
+	fmt.printf("    coefficients")
+	for j in 0 ..< 4 {
+		fmt.printf("  c%d=%.4f", cols[j], dbeta[j])
+	}
+	fmt.println()
+	fmt.println("    (the interaction term is noise here, so it buys nothing)")
+
 	fmt.println()
 	fmt.println("For reference, the coefficients the data was generated from:")
 	fmt.printf("  b0=%.4f  b2=%.4f  b5=%.4f  (all others exactly zero)\n",
