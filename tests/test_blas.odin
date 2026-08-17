@@ -650,6 +650,9 @@ main :: proc() {
         {"reproducible and chunkable", test_synth_reproducible_and_chunkable},
         {"generator boundaries", test_synth_boundaries},
         {"generator no allocation", test_synth_no_allocation},
+        {"sigma leaves X alone", test_synth_sigma_leaves_x_alone},
+        {"rows addressable", test_synth_row_addressable},
+        {"hash independence", test_synth_stream_independence},
     }) {
         if t.fn() {passed += 1} else {failed += 1}
     }

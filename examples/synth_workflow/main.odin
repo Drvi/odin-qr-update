@@ -113,8 +113,7 @@ main :: proc() {
 		return
 	}
 
-	rng: synth.Rng
-	synth.rng_seed(&rng, 20260817)
+	SEED :: u32(20260817)
 
 	fmt.println("=== Generate data with a known answer, then look for it ===")
 	fmt.println()
@@ -139,8 +138,10 @@ main :: proc() {
 	done := 0
 	for done < M {
 		take := min(CHUNK, M - done)
+		// first_row is absolute, so this batch does not depend on the ones
+		// before it -- the same call could run on another thread, or not at all.
 		if e := synth.synth_rows(
-			&spec, &rng, x[done * NT:], NT, y[done:], take,
+			&spec, SEED, done, x[done * NT:], NT, y[done:], take,
 		); e != .None {
 			fmt.printf("synth_rows failed: %v\n", e)
 			return

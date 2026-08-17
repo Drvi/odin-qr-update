@@ -72,14 +72,112 @@ Zero variance is rejected rather than allowed: it would mean a constant
 predictor, which is what an all-zero term row already provides, and it makes
 `Sigma` singular.
 
+## Why the random source is counter-based (and what that means for GPU)
+
+Every draw is a pure function of `(seed, stream, index)`. Nothing is carried
+between calls; there is no state to advance.
+
+That was adopted to fix a real defect, not for elegance. The first version used
+a sequential stream (xoshiro256\*\* with a cached Box-Muller spare), and the
+noise draw shared that stream with the base variables — so **raising `sigma`
+silently produced a different `X`**. "The same data with more noise", the most
+natural experiment for a generator whose job is checking a solver, was not
+expressible. Separate counter-indexed streams make `X` bit-identical across
+noise levels, which `test_synth_sigma_leaves_x_alone` now pins down.
+
+Three further properties come along with it:
+
+- **Row-addressable.** Row *i* depends only on `(seed, i)`, so any row is
+  generatable alone, out of order, or in parallel, with no coordination.
+  `test_synth_row_addressable` checks single rows, out-of-order requests and
+  reverse-order batches all match one sequential call.
+- **Order-independent reproducibility.** Chunk boundaries cannot affect output,
+  because nothing crosses them.
+- **32-bit integer core**, which is what a GPU wants.
+
+### On GPU specifically
+
+The GPU-hostile part of Gaussian generation is not the Gaussian, it is state and
+divergence:
+
+| method | GPU verdict |
+|---|---|
+| Ziggurat | Fastest on CPU, **worst** on GPU: the rejection loop has a data-dependent trip count, so a warp waits for its unluckiest lane. |
+| Marsaglia polar | Same rejection problem. |
+| **Box-Muller** | Fine. `log`, `sqrt`, `sincos` all have hardware approximations (SFU, typically quarter rate). Fixed cost, no divergence. Used here. |
+| **Inverse CDF / probit** | Structurally the most GPU-friendly: one uniform in, one normal out, no pairing and nothing to cache. Costs being an approximation — Acklam is ~1e-9 relative, Wichura AS241 ~1e-16 for more polynomial. Worth switching to if the pairing ever becomes awkward. |
+| Sum of uniforms (CLT) | Cheapest and wrong. Passes variance and correlation, fails the tails — `test_synth_statistics`' kurtosis check exists to reject exactly this. |
+
+**What ports as-is:** `synth_hash` is `u32` add/xor/shift/multiply only and
+translates verbatim to GLSL/HLSL/WGSL. `synth_normal_pair` is four
+transcendentals and no branches. The `L*z` correlation transform is `k^2/2`
+multiply-adds per thread, and the Cholesky factor itself is computed once on the
+CPU and uploaded as `k*k` floats in a constant buffer — `dpotrf` does not need
+to run on the GPU at all. The term expansion is a short fixed loop over a `u8`
+table.
+
+**What does not port:** `f64`. Consumer GPUs run double precision at 1/32 to
+1/64 rate, so a GPU version should be `f32` throughout. That also collapses the
+53-bit magnitude uniform to 32 bits, which moves the Box-Muller tail cut from
+about 8.5 sigma to about 6.2 sigma — irrelevant for `f32` data, worth knowing.
+
+**Versus rngeasy's approach.** rngeasy keeps 64 bits of state and advances a
+xoroshiro64\*\* stream, with portability handled by `#define RNGSTATE_REF`
+(`RngState&` on CPU, `inout RngState` in GLSL). That is a perfectly good GPU
+choice — two registers per thread — but it needs per-thread seeding and makes
+output depend on how many values each thread consumed. Counter-based needs no
+per-thread state and no seeding discipline at all: `normal(seed, stream, index)`
+is the whole interface. The tradeoff is recomputation instead of caching, which
+is measured below. rngeasy has no Gaussian generator, so nothing here contradicts
+it.
+
+**Not verified: none of this has been run on a GPU.** There is no GPU in this
+project. The claims above are about the shape of the code — no state, no
+rejection, 32-bit integer arithmetic, fixed instruction count per draw — not
+measurements. Filed as `issues/008-gpu-port.md`.
+
+### Cost of statelessness, measured
+
+`k = 5`, 6 terms, 1,000,000 rows, min of 7, same machine as `docs/OLS_RESULTS.md`:
+
+| | ns/row | Mrows/s |
+|---|---|---|
+| stateful xoshiro + cached spare (previous version) | 217.1 | 4.61 |
+| counter-based, draws indexed per row | 286.9 | 3.49 |
+| counter-based, draws indexed **globally** | **230.8** | **4.33** |
+
+The middle row is what naive statelessness costs: at `k = 5` it computes four
+Box-Muller pairs per row where caching computed three, because the spare cannot
+cross the base/noise boundary or the row boundary. 4/3 is 33%, and 34% was
+measured.
+
+Indexing draws globally — base draw *j* of row *r* is index `r*k + j` — lets
+pairs straddle those boundaries, and a pair cache local to the batch call
+recovers most of it. The cache holds only values already derivable from the
+index, so results are unchanged; the addressability and chunk-invariance tests
+still pass unmodified. Residual overhead is **6.3%**, which is the extra hash
+work (three hashes at two `splitmix32` rounds each per pair, against one
+xoshiro advance) plus the cache branch.
+
+Component costs, same conditions: `synth_hash` is **1.23 ns**, and a full
+`synth_normal` draw is **58.3 ns**. So the hash — the part that had to change
+for statelessness — is under 2% of a draw, and the four transcendentals are
+essentially all of it. That is also the part that would get relatively cheaper
+on a GPU, where they are hardware instructions.
+
+Global indexing bounds the row count: `(first_row + count) * k` must stay under
+`2^32`, or draw indices wrap and rows alias each other. That is checked and
+returns `.Invalid_Dimension` rather than silently repeating data. At `k = 100`
+the limit is about 43 million rows.
+
 ## Reproducibility
 
-The `Rng` (xoshiro256\*\* seeded through SplitMix64, with a cached Box-Muller
-spare) is held by the caller, so the stream is explicit. Same seed gives
-identical bytes, which is what makes a failing case re-runnable. Chunked
-generation is bit-identical to one large call, because the stream simply
-continues — so generation can be spread over frames or streamed straight into
-an `Ols_Accum` without ever holding all rows.
+`synth_rows` takes a `seed` and an absolute `first_row`; there is no generator
+object. Same `(seed, first_row)` always gives the same rows, on any machine, in
+any order, so a failing case is re-runnable from two integers. Chunked
+generation is bit-identical to one large call because nothing crosses a call
+boundary — generation can be spread over frames or streamed straight into an
+`Ols_Accum` without ever holding all rows.
 
 ## Verified
 

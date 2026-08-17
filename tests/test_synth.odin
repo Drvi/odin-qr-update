@@ -129,9 +129,8 @@ test_synth_statistics :: proc() -> bool {
 
 	x := make([]f64, M * K);defer delete(x)
 	y := make([]f64, M);defer delete(y)
-	rng: synth.Rng
-	synth.rng_seed(&rng, 20260817)
-	if e := synth.synth_rows(&spec, &rng, x, K, y, M); e != .None {
+	SEED :: u32(20260817)
+	if e := synth.synth_rows(&spec, SEED, 0, x, K, y, M); e != .None {
 		fmt.printf("  FAILED: rows %v\n", e)
 		return false
 	}
@@ -227,9 +226,8 @@ test_synth_noise_level :: proc() -> bool {
 		}
 		x := make([]f64, M * 3);defer delete(x)
 		y := make([]f64, M);defer delete(y)
-		rng: synth.Rng
-		synth.rng_seed(&rng, 99)
-		synth.synth_rows(&spec, &rng, x, 3, y, M)
+	SEED :: u32(99)
+		synth.synth_rows(&spec, SEED, 0, x, 3, y, M)
 
 		// Residual against the TRUE coefficients is exactly the injected noise.
 		ss := 0.0
@@ -295,9 +293,8 @@ test_synth_polynomial_terms :: proc() -> bool {
 
 	x := make([]f64, M * NT);defer delete(x)
 	y := make([]f64, M);defer delete(y)
-	rng: synth.Rng
-	synth.rng_seed(&rng, 4)
-	synth.synth_rows(&spec, &rng, x, NT, y, M)
+	SEED :: u32(4)
+	synth.synth_rows(&spec, SEED, 0, x, NT, y, M)
 
 	// The exponent algebra must hold exactly, row by row: columns 3..6 are
 	// products of columns 1 and 2 and the (unobserved) b2. b2 is recoverable
@@ -396,9 +393,8 @@ test_synth_ols_recovers_coefficients :: proc() -> bool {
 
 	x := make([]f64, M * NT);defer delete(x)
 	y := make([]f64, M);defer delete(y)
-	rng: synth.Rng
-	synth.rng_seed(&rng, 777)
-	synth.synth_rows(&spec, &rng, x, NT, y, M)
+	SEED :: u32(777)
+	synth.synth_rows(&spec, SEED, 0, x, NT, y, M)
 
 	// Noiseless: the fit must reproduce the planted coefficients almost exactly.
 	abuf := make([]f64, blas.ols_accum_scratch(NT));defer delete(abuf)
@@ -435,9 +431,8 @@ test_synth_ols_recovers_coefficients :: proc() -> bool {
 	spec2: synth.Spec
 	s2 := make([]f64, synth.synth_scratch(K));defer delete(s2)
 	synth.synth_init(&spec2, K, corr[:], variance[:], terms[:], coef[:], SIGMA, s2)
-	rng2: synth.Rng
-	synth.rng_seed(&rng2, 778)
-	synth.synth_rows(&spec2, &rng2, x, NT, y, M)
+	SEED2 :: u32(778)
+	synth.synth_rows(&spec2, SEED2, 0, x, NT, y, M)
 
 	b2 := make([]f64, blas.ols_accum_scratch(NT));defer delete(b2)
 	acc2: blas.Ols_Accum
@@ -491,12 +486,10 @@ test_synth_reproducible_and_chunkable :: proc() -> bool {
 		sc := make([]f64, synth.synth_scratch(K));defer delete(sc)
 		spec: synth.Spec
 		synth.synth_init(&spec, K, corr[:], variance[:], terms[:], coef[:], 0.25, sc)
-		rng: synth.Rng
-		synth.rng_seed(&rng, seed)
 		done := 0
 		for done < M {
 			take := min(chunk, M - done)
-			synth.synth_rows(&spec, &rng, x[done * NT:], NT, y[done:], take)
+			synth.synth_rows(&spec, u32(seed), done, x[done * NT:], NT, y[done:], take)
 			done += take
 		}
 	}
@@ -561,9 +554,8 @@ test_synth_reproducible_and_chunkable :: proc() -> bool {
 		sc := make([]f64, synth.synth_scratch(K));defer delete(sc)
 		spec: synth.Spec
 		synth.synth_init(&spec, K, corr[:], variance[:], terms[:], coef[:], 0.25, sc)
-		rng: synth.Rng
-		synth.rng_seed(&rng, 1234)
-		synth.synth_rows(&spec, &rng, w_x, WIDE, w_y, M)
+	SEED :: u32(1234)
+		synth.synth_rows(&spec, SEED, 0, w_x, WIDE, w_y, M)
 	}
 	for i in 0 ..< M {
 		for t in 0 ..< NT {
@@ -707,22 +699,21 @@ test_synth_boundaries :: proc() -> bool {
 	}
 	x := make([]f64, 10 * 2);defer delete(x)
 	y := make([]f64, 10);defer delete(y)
-	rng: synth.Rng
-	synth.rng_seed(&rng, 1)
+	SEED :: u32(1)
 
-	if e := synth.synth_rows(&spec, &rng, x, 1, y, 4); e != .Invalid_Dimension {
+	if e := synth.synth_rows(&spec, SEED, 0, x, 1, y, 4); e != .Invalid_Dimension {
 		fmt.printf("  FAILED: ldx < nterms -> %v\n", e)
 		return false
 	}
-	if e := synth.synth_rows(&spec, &rng, x, 2, y, -1); e != .Invalid_Dimension {
+	if e := synth.synth_rows(&spec, SEED, 0, x, 2, y, -1); e != .Invalid_Dimension {
 		fmt.printf("  FAILED: negative count -> %v\n", e)
 		return false
 	}
-	if e := synth.synth_rows(&spec, &rng, x, 2, y, 11); e != .Invalid_Dimension {
+	if e := synth.synth_rows(&spec, SEED, 0, x, 2, y, 11); e != .Invalid_Dimension {
 		fmt.printf("  FAILED: overrun -> %v\n", e)
 		return false
 	}
-	if e := synth.synth_rows(&spec, &rng, x, 2, y, 0); e != .None {
+	if e := synth.synth_rows(&spec, SEED, 0, x, 2, y, 0); e != .None {
 		fmt.printf("  FAILED: count=0 -> %v\n", e)
 		return false
 	}
@@ -771,9 +762,8 @@ test_synth_no_allocation :: proc() -> bool {
 
 	x: [M * NT]f64
 	y: [M]f64
-	rng: synth.Rng
-	synth.rng_seed(&rng, 5)
-	if e := synth.synth_rows(&spec, &rng, x[:], NT, y[:], M); e != .None {
+	SEED :: u32(5)
+	if e := synth.synth_rows(&spec, SEED, 0, x[:], NT, y[:], M); e != .None {
 		fmt.printf("  FAILED: rows %v\n", e)
 		return false
 	}
@@ -795,5 +785,223 @@ test_synth_no_allocation :: proc() -> bool {
 		}
 	}
 	fmt.println("  PASSED (generate and fit with no heap at all)")
+	return true
+}
+
+// ============================================================================
+// Properties that only the counter-based scheme can offer
+// ============================================================================
+
+test_synth_sigma_leaves_x_alone :: proc() -> bool {
+	fmt.println("Testing sigma changes y but not X...")
+
+	// The point of separate streams. With one shared sequential stream the
+	// noise draw shifts every subsequent base draw, so raising sigma silently
+	// produces a different design matrix and "the same data with more noise"
+	// is not expressible.
+	// The spec lives in `gen` below; only the shapes are needed out here.
+	NT :: 4
+	M :: 500
+	SEED :: u32(31337)
+
+	ref_x := make([]f64, M * NT);defer delete(ref_x)
+	ref_y := make([]f64, M);defer delete(ref_y)
+	got_x := make([]f64, M * NT);defer delete(got_x)
+	got_y := make([]f64, M);defer delete(got_y)
+
+	gen :: proc(sigma: f64, seed: u32, x: []f64, y: []f64) -> synth.Synth_Error {
+		K :: 3
+		NT :: 4
+		M :: 500
+		corr := [K * K]f64{1, 0.5, 0.2, 0.5, 1, -0.3, 0.2, -0.3, 1}
+		variance := [K]f64{1, 2, 0.5}
+		terms := [NT * K]u8{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1}
+		coef := [NT]f64{1, 2, -1, 0.5}
+		sc := make([]f64, synth.synth_scratch(K));defer delete(sc)
+		spec: synth.Spec
+		if e := synth.synth_init(&spec, K, corr[:], variance[:], terms[:], coef[:], sigma, sc);
+		   e != .None {
+			return e
+		}
+		return synth.synth_rows(&spec, seed, 0, x, NT, y, M)
+	}
+
+	if e := gen(0.0, SEED, ref_x, ref_y); e != .None {
+		fmt.printf("  FAILED: noiseless gen %v\n", e)
+		return false
+	}
+	for sigma in ([]f64{0.01, 0.5, 10.0}) {
+		if e := gen(sigma, SEED, got_x, got_y); e != .None {
+			fmt.printf("  FAILED: gen sigma=%.2f -> %v\n", sigma, e)
+			return false
+		}
+		// X must be bit-identical across noise levels.
+		for i in 0 ..< M * NT {
+			if got_x[i] != ref_x[i] {
+				fmt.printf("  FAILED: sigma=%.2f changed X at [%d]\n", sigma, i)
+				return false
+			}
+		}
+		// y must differ, or sigma is being ignored.
+		same := true
+		for i in 0 ..< M {
+			if got_y[i] != ref_y[i] {same = false;break}
+		}
+		if same {
+			fmt.printf("  FAILED: sigma=%.2f left y unchanged\n", sigma)
+			return false
+		}
+	}
+	fmt.println("  PASSED (X bit-identical across sigma 0 / 0.01 / 0.5 / 10)")
+	return true
+}
+
+test_synth_row_addressable :: proc() -> bool {
+	fmt.println("Testing rows are individually addressable and order-free...")
+
+	K :: 2
+	NT :: 3
+	M :: 300
+	corr := [K * K]f64{1, 0.3, 0.3, 1}
+	variance := [K]f64{1, 1}
+	terms := [NT * K]u8{0, 0, 1, 0, 0, 1}
+	coef := [NT]f64{1, 1, 1}
+	SEED :: u32(8675309)
+
+	sc := make([]f64, synth.synth_scratch(K));defer delete(sc)
+	spec: synth.Spec
+	synth.synth_init(&spec, K, corr[:], variance[:], terms[:], coef[:], 0.3, sc)
+
+	all_x := make([]f64, M * NT);defer delete(all_x)
+	all_y := make([]f64, M);defer delete(all_y)
+	synth.synth_rows(&spec, SEED, 0, all_x, NT, all_y, M)
+
+	// One row at a time, requested out of order and skipping most of them.
+	one_x: [NT]f64
+	one_y: [1]f64
+	for r in ([]int{0, 299, 17, 250, 1, 100}) {
+		if e := synth.synth_rows(&spec, SEED, r, one_x[:], NT, one_y[:], 1); e != .None {
+			fmt.printf("  FAILED: row %d -> %v\n", r, e)
+			return false
+		}
+		for t in 0 ..< NT {
+			if one_x[t] != all_x[r * NT + t] {
+				fmt.printf("  FAILED: row %d col %d: %.17e vs %.17e\n",
+					r, t, one_x[t], all_x[r * NT + t])
+				return false
+			}
+		}
+		if one_y[0] != all_y[r] {
+			fmt.printf("  FAILED: row %d y: %.17e vs %.17e\n", r, one_y[0], all_y[r])
+			return false
+		}
+	}
+
+	// A whole range generated backwards, batch by batch, must still match.
+	rev_x := make([]f64, M * NT);defer delete(rev_x)
+	rev_y := make([]f64, M);defer delete(rev_y)
+	CH :: 37
+	start := ((M - 1) / CH) * CH
+	for start >= 0 {
+		take := min(CH, M - start)
+		synth.synth_rows(&spec, SEED, start, rev_x[start * NT:], NT, rev_y[start:], take)
+		start -= CH
+	}
+	for i in 0 ..< M * NT {
+		if rev_x[i] != all_x[i] {
+			fmt.printf("  FAILED: reverse-order generation differs at [%d]\n", i)
+			return false
+		}
+	}
+	fmt.println("  PASSED (single rows, out of order, and reverse-order batches all match)")
+	return true
+}
+
+test_synth_stream_independence :: proc() -> bool {
+	fmt.println("Testing hash quality: stream and serial independence...")
+
+	// A counter-based generator lives or dies on its hash. Two failure modes
+	// matter here and neither would be caught by the moment tests:
+	//
+	//   * correlated streams -- the noise would correlate with X, biasing every
+	//     fitted coefficient while the marginal distributions stayed perfect
+	//   * serial correlation between adjacent indices -- adjacent indices are
+	//     exactly what consecutive rows use
+	N :: 200_000
+	SEED :: u32(0xC0FFEE)
+	// 4.5 / sqrt(N) is about 0.010; a correlation this size is ~4.5 sigma.
+	TOL :: 0.010
+
+	corr_of :: proc(a: []f64, b: []f64) -> f64 {
+		n := len(a)
+		ma, mb := 0.0, 0.0
+		for i in 0 ..< n {ma += a[i];mb += b[i]}
+		ma /= f64(n);mb /= f64(n)
+		sab, saa, sbb := 0.0, 0.0, 0.0
+		for i in 0 ..< n {
+			da := a[i] - ma
+			db := b[i] - mb
+			sab += da * db
+			saa += da * da
+			sbb += db * db
+		}
+		return sab / math.sqrt_f64(saa * sbb)
+	}
+
+	base := make([]f64, N);defer delete(base)
+	noise := make([]f64, N);defer delete(noise)
+	next := make([]f64, N);defer delete(next)
+	other_seed := make([]f64, N);defer delete(other_seed)
+
+	for i in 0 ..< N {
+		base[i] = synth.synth_normal(SEED, synth.STREAM_BASE, u32(i))
+		noise[i] = synth.synth_normal(SEED, synth.STREAM_NOISE, u32(i))
+		next[i] = synth.synth_normal(SEED, synth.STREAM_BASE, u32(i + 1))
+		other_seed[i] = synth.synth_normal(SEED + 1, synth.STREAM_BASE, u32(i))
+	}
+
+	checks := []struct {
+		name: string,
+		a:    []f64,
+		b:    []f64,
+	} {
+		{"base vs noise stream", base, noise},
+		{"adjacent indices", base, next},
+		{"adjacent seeds", base, other_seed},
+		{"noise vs next base", noise, next},
+	}
+	for c in checks {
+		r := corr_of(c.a, c.b)
+		if abs(r) > TOL {
+			fmt.printf("  FAILED: %s correlation %+.5f exceeds %.3f\n", c.name, r, TOL)
+			return false
+		}
+		fmt.printf("    %-22s r = %+.5f\n", c.name, r)
+	}
+
+	// The uniform feeding Box-Muller must be uniform, not merely unbiased:
+	// check occupancy of 64 equal bins. Expected count N/64 with sd
+	// sqrt(N/64), so 5 sigma is 5*sqrt(3125) = 279 on 3125.
+	BINS :: 64
+	counts: [BINS]int
+	for i in 0 ..< N {
+		// Recover the uniform via the standard normal CDF is awkward; instead
+		// bin the raw hash, which is what uniformity is a property of.
+		h := synth.synth_hash(SEED, synth.STREAM_BASE, u32(i))
+		counts[int(h >> 26)] += 1
+	}
+	expect := f64(N) / f64(BINS)
+	chi2 := 0.0
+	for c in counts {
+		d := f64(c) - expect
+		chi2 += d * d / expect
+	}
+	// 63 degrees of freedom: the 99.9th percentile is about 112.
+	if chi2 > 112.0 {
+		fmt.printf("  FAILED: hash bin chi-square %.1f on 63 df, too high\n", chi2)
+		return false
+	}
+	fmt.printf("    hash uniformity chi2 = %.1f on 63 df (99.9%% point 112)\n", chi2)
+	fmt.println("  PASSED")
 	return true
 }

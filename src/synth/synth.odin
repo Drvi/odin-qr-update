@@ -55,73 +55,111 @@ Synth_Error :: enum {
 CORR_TOL :: 1.0e-9
 
 // ============================================================================
-// Random source
+// Random source: counter-based, stateless
 // ============================================================================
+//
+// Every draw is a pure function of (seed, stream, index). There is no state
+// carried between calls and nothing to advance, which buys three things:
+//
+//   1. Row i is generatable without generating rows 0..i-1, so generation
+//      parallelises with no coordination and resumes at any offset.
+//   2. The base variables and the response noise draw from SEPARATE streams,
+//      so changing sigma cannot perturb X. Fitting the same design matrix at
+//      several noise levels is then a real experiment. A sequential stream
+//      cannot do this: the noise draw shifts everything after it.
+//   3. The arithmetic is 32-bit integer only, which is what a GPU wants --
+//      see docs/SYNTH.md for what a GLSL/HLSL port needs.
+//
+// The cost of statelessness is recomputation: a Box-Muller pair is derived
+// from its pair index rather than cached, so nothing is remembered but nothing
+// is wasted either, because both halves of each pair are consumed.
 
-// Rng is xoshiro256** with a cached spare normal deviate. Held by the caller so
-// the stream is explicit and reproducible: the same seed always gives the same
-// data, which is what makes a failing test re-runnable.
-Rng :: struct {
-	s:          [4]u64,
-	spare:      f64,
-	has_spare:  bool,
-}
+// Stream identifiers. Distinct streams are statistically independent, which
+// test_synth_stream_independence checks rather than assumes.
+STREAM_BASE :: u32(0) // the base variables
+STREAM_NOISE :: u32(1) // the response noise
 
-// rng_seed initialises the stream. Any seed is valid, including 0.
-rng_seed :: proc "contextless" (r: ^Rng, seed: u64) {
-	// SplitMix64 to spread one word over the whole state; xoshiro behaves badly
-	// from a nearly-zero state.
-	z := seed
-	for i in 0 ..< 4 {
-		z += 0x9E3779B97F4A7C15
-		v := z
-		v = (v ~ (v >> 30)) * 0xBF58476D1CE4E5B9
-		v = (v ~ (v >> 27)) * 0x94D049BB133111EB
-		r.s[i] = v ~ (v >> 31)
-	}
-	r.has_spare = false
-	r.spare = 0
-}
-
+// splitmix32 finalizer, as used by rngeasy for seeding. Bijective, so it
+// cannot map distinct inputs onto the same output.
 @(private = "file")
-rotl :: #force_inline proc "contextless" (x: u64, k: uint) -> u64 {
-	return (x << k) | (x >> (64 - k))
+splitmix32 :: #force_inline proc "contextless" (b: u32) -> u32 {
+	x := b
+	x += 0x9E3779B9
+	x ~= x >> 15
+	x *= 0x85EBCA6B
+	x ~= x >> 13
+	x *= 0xC2B2AE3D
+	x ~= x >> 16
+	return x
 }
 
-// rng_u64 returns the next raw word.
-rng_u64 :: proc "contextless" (r: ^Rng) -> u64 {
-	result := rotl(r.s[1] * 5, 7) * 9
-	t := r.s[1] << 17
-	r.s[2] ~= r.s[0]
-	r.s[3] ~= r.s[1]
-	r.s[1] ~= r.s[2]
-	r.s[0] ~= r.s[3]
-	r.s[2] ~= t
-	r.s[3] = rotl(r.s[3], 45)
-	return result
+// synth_hash mixes (seed, stream, index) into one word.
+//
+// Two splitmix32 rounds over a Weyl-mixed input. Two rounds rather than one
+// because a single round leaves visible structure between adjacent indices,
+// and adjacent indices are exactly what this is used with.
+synth_hash :: proc "contextless" (seed: u32, stream: u32, index: u32) -> u32 {
+	h := seed
+	h += index * 0x9E3779B9
+	h ~= stream * 0x85EBCA6B
+	return splitmix32(splitmix32(h))
 }
 
-// rng_open01 returns a uniform in (0, 1): never 0, so log() is always safe.
-rng_open01 :: proc "contextless" (r: ^Rng) -> f64 {
-	// 53 significand bits, shifted into [1, 2) then offset, giving (0,1).
-	u := rng_u64(r) >> 11
-	return (f64(u) + 0.5) * (1.0 / 9007199254740992.0)
+// synth_uniform53 returns a uniform in (0,1) with 53 significant bits, built
+// from two hashes.
+//
+// The extra hash buys tail depth. A 32-bit uniform bottoms out at 1.2e-10,
+// which truncates a Box-Muller normal at about 6.2 sigma; 53 bits reaches
+// about 8.5 sigma, past where f64 sampling has any practical meaning.
+@(private = "file")
+uniform53 :: #force_inline proc "contextless" (seed, stream, index: u32) -> f64 {
+	hi := u64(synth_hash(seed, stream, index * 2))
+	lo := u64(synth_hash(seed, stream, index * 2 + 1))
+	// 53 bits: 32 high, 21 low.
+	bits := (hi << 21) | (lo >> 11)
+	return (f64(bits) + 0.5) * (1.0 / 9007199254740992.0)
 }
 
-// rng_normal returns a standard normal deviate by Box-Muller, generating two at
-// a time and keeping the spare.
-rng_normal :: proc "contextless" (r: ^Rng) -> f64 {
-	if r.has_spare {
-		r.has_spare = false
-		return r.spare
-	}
-	u1 := rng_open01(r)
-	u2 := rng_open01(r)
+// synth_uniform32 returns a uniform in (0,1) with 32 significant bits. Used
+// for the Box-Muller angle, where resolution is irrelevant.
+@(private = "file")
+uniform32 :: #force_inline proc "contextless" (seed, stream, index: u32) -> f64 {
+	return (f64(synth_hash(seed, stream, index)) + 0.5) * (1.0 / 4294967296.0)
+}
+
+// synth_normal_pair returns two independent standard normal deviates for the
+// given pair index. Box-Muller, exact rather than an approximation to the
+// inverse CDF, and both halves are returned so nothing is discarded.
+//
+// Three hashes per pair: two for the magnitude uniform (53 bits, for tail
+// depth) and one for the angle.
+synth_normal_pair :: proc "contextless" (
+	seed: u32,
+	stream: u32,
+	pair_index: u32,
+) -> (
+	f64,
+	f64,
+) {
+	// Offset the two sub-streams so the angle hash cannot collide with either
+	// magnitude hash.
+	u1 := uniform53(seed, stream, pair_index * 2)
+	u2 := uniform32(seed, stream ~ 0x5BF03635, pair_index)
 	mag := math.sqrt_f64(-2.0 * math.ln_f64(u1))
 	ang := 2.0 * math.PI * u2
-	r.spare = mag * math.sin_f64(ang)
-	r.has_spare = true
-	return mag * math.cos_f64(ang)
+	return mag * math.cos_f64(ang), mag * math.sin_f64(ang)
+}
+
+// synth_normal returns one standard normal deviate at an absolute draw index.
+//
+// Index-addressable: draw i is derived from pair i/2 and selected by parity, so
+// any single draw is reachable without touching the others. Consecutive
+// even/odd pairs share a pair computation, so a loop over indices in order
+// pays for each Box-Muller pair once if the compiler keeps it, and twice if
+// not -- correctness does not depend on which.
+synth_normal :: proc "contextless" (seed: u32, stream: u32, index: u32) -> f64 {
+	a, b := synth_normal_pair(seed, stream, index / 2)
+	return index % 2 == 0 ? a : b
 }
 
 // ============================================================================
@@ -264,27 +302,36 @@ synth_term_count :: proc "contextless" (spec: ^Spec) -> int {
 // synth_rows generates a batch of observations.
 //
 // BATCH CONTRACT
-//   spec  in     initialised by synth_init. Its scratch is reused per row, so
-//                one spec cannot be driven from two threads at once; give each
-//                thread its own spec and its own Rng.
-//   rng   in/out the random stream; advanced. Seed it with rng_seed.
-//   x     out    f64[>= (count-1)*ldx + nterms], row-major, row stride
-//                ldx >= nterms. Row i column t is the value of term t.
-//   ldx   in     row stride, so a caller can generate into a wider table and
-//                leave spare columns for terms added later.
-//   y     out    f64[>= count], the response.
-//   count in     rows to generate, >= 0. 0 is a no-op.
+//   spec      in   initialised by synth_init. Its per-row scratch is reused, so
+//                  one Spec cannot be driven from two threads at once; give each
+//                  thread its own Spec (they can share the same seed).
+//   seed      in   any u32. Together with first_row it fully determines the
+//                  output, so the same (seed, first_row) always gives the same
+//                  rows, on any machine, in any order.
+//   first_row in   ABSOLUTE row index of the first row of this batch, >= 0.
+//                  Row i depends only on (seed, i), so batches may be generated
+//                  in any order, in parallel, or not at all.
+//   x         out  f64[>= (count-1)*ldx + nterms], row-major, row stride
+//                  ldx >= nterms. Row i column t is the value of term t.
+//   y         out  f64[>= count], the response.
+//   count     in   rows to generate, >= 0. 0 is a no-op.
 //
-// Chunkable: call repeatedly with advancing slices to spread generation over
-// frames, or to stream rows straight into an Ols_Accum without ever holding
-// them all. The stream continues from wherever the Rng left off, so the
-// concatenation of chunked calls is identical to one big call.
+// Because the base variables and the noise use separate streams, changing
+// sigma changes only y and leaves X untouched. Fitting one design matrix at
+// several noise levels is therefore a controlled experiment, which a shared
+// sequential stream cannot offer.
 //
-// Cost per row: k normal draws, k^2/2 for the correlation transform, and one
-// pass over the terms whose cost is the total degree. All O(1) memory.
+// Chunkable and reorderable: the concatenation of any partition of [0, m) is
+// identical to one call over the whole range, because nothing is carried
+// between calls.
+//
+// Cost per row: k normal draws (3 hashes per pair of draws), k^2/2 for the
+// correlation transform, and one pass over the terms costing their total
+// degree. O(1) memory.
 synth_rows :: proc "contextless" (
 	spec: ^Spec,
-	rng: ^Rng,
+	seed: u32,
+	first_row: int,
 	x: []f64,
 	ldx: int,
 	y: []f64,
@@ -294,7 +341,7 @@ synth_rows :: proc "contextless" (
 	if k < 1 || nterms < 1 {
 		return .Invalid_Dimension
 	}
-	if count < 0 || ldx < nterms {
+	if count < 0 || first_row < 0 || ldx < nterms {
 		return .Invalid_Dimension
 	}
 	if count == 0 {
@@ -304,18 +351,46 @@ synth_rows :: proc "contextless" (
 		return .Invalid_Dimension
 	}
 
+	// Draw indices are GLOBAL: base draw j of row r is index r*k + j, and the
+	// noise draw for row r is index r. Both are pure functions of the row, so
+	// addressability is unaffected -- but because consecutive rows land in
+	// consecutive pairs, a pair computed for one draw usually serves the next
+	// one too. The two caches below are local to this call and hold only what
+	// was already derivable, so they change cost and not results.
+	if u64(first_row + count) * u64(k) > 0xFFFFFFFF {
+		// Beyond this the global draw index wraps and rows would alias each
+		// other's draws. Rejected rather than silently repeating data.
+		return .Invalid_Dimension
+	}
+
+	NO_PAIR :: ~u64(0)
+	bp_idx := NO_PAIR // cached base pair index
+	bp_a, bp_b := 0.0, 0.0
+	np_idx := NO_PAIR // cached noise pair index
+	np_a, np_b := 0.0, 0.0
+
 	for i in 0 ..< count {
-		// Independent standard normals.
+		abs_row := u64(first_row + i)
+
+		// Base variables, drawn from a globally indexed stream so that pairs
+		// straddle row boundaries and nothing is wasted on odd k.
 		for j in 0 ..< k {
-			spec.z[j] = rng_normal(rng)
+			gi := abs_row * u64(k) + u64(j)
+			pi := gi >> 1
+			if pi != bp_idx {
+				bp_a, bp_b = synth_normal_pair(seed, STREAM_BASE, u32(pi))
+				bp_idx = pi
+			}
+			spec.z[j] = gi & 1 == 0 ? bp_a : bp_b
 		}
+
 		// base = L * z, giving covariance L*L' = D*corr*D.
 		for a in 0 ..< k {
-			s := 0.0
+			sum := 0.0
 			for b in 0 ..= a {
-				s += spec.chol[a * k + b] * spec.z[b]
+				sum += spec.chol[a * k + b] * spec.z[b]
 			}
-			spec.base[a] = s
+			spec.base[a] = sum
 		}
 
 		// Expand the terms. An all-zero exponent row leaves the product at 1,
@@ -325,17 +400,24 @@ synth_rows :: proc "contextless" (
 		for t in 0 ..< nterms {
 			te := t * k
 			v := 1.0
-			for j in 0 ..< k {
-				e := spec.terms[te + j]
+			for jj in 0 ..< k {
+				e := spec.terms[te + jj]
 				for _ in 0 ..< e {
-					v *= spec.base[j]
+					v *= spec.base[jj]
 				}
 			}
 			x[row + t] = v
 			resp += spec.coef[t] * v
 		}
 		if spec.sigma != 0.0 {
-			resp += spec.sigma * rng_normal(rng)
+			// A separate stream, indexed by row: this is what keeps X
+			// independent of sigma. Paired across consecutive rows, same as above.
+			pi := abs_row >> 1
+			if pi != np_idx {
+				np_a, np_b = synth_normal_pair(seed, STREAM_NOISE, u32(pi))
+				np_idx = pi
+			}
+			resp += spec.sigma * (abs_row & 1 == 0 ? np_a : np_b)
 		}
 		y[i] = resp
 	}
