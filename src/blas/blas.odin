@@ -6,6 +6,7 @@
 // - BLAS Level 2: Matrix-vector operations (dgemv, dtrsv, dger, dtrmv)
 // - LAPACK auxiliaries: Givens rotation generation (dlartg), Householder reflectors (dlarfg)
 // - QR update routines: delcols, delcolsq, addcols, addcolsq, addrows, delrows
+// - Cholesky factorization (cholesky.odin): dpotrf
 // - Least squares (lstsq.odin): ols_solve_dense and Ols_Accum, for solving
 //   min ||X*beta - y||. See docs/OLS_PLAN.md and docs/OLS_RESULTS.md.
 //

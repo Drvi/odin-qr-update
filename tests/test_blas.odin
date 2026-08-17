@@ -639,6 +639,21 @@ main :: proc() {
         if t.fn() {passed += 1} else {failed += 1}
     }
 
+    // Synthetic data generation
+    fmt.println("\n--- Synthetic data ---")
+    for t in ([]Test {
+        {"dpotrf", test_dpotrf},
+        {"generated statistics", test_synth_statistics},
+        {"noise level", test_synth_noise_level},
+        {"polynomial terms", test_synth_polynomial_terms},
+        {"OLS recovers coefficients", test_synth_ols_recovers_coefficients},
+        {"reproducible and chunkable", test_synth_reproducible_and_chunkable},
+        {"generator boundaries", test_synth_boundaries},
+        {"generator no allocation", test_synth_no_allocation},
+    }) {
+        if t.fn() {passed += 1} else {failed += 1}
+    }
+
     fmt.println("\n=== Summary ===")
     fmt.printf("Passed: %d, Failed: %d\n", passed, failed)
 
