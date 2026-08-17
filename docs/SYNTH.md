@@ -102,9 +102,9 @@ divergence:
 
 | method | GPU verdict |
 |---|---|
-| Ziggurat | Fastest on CPU, **worst** on GPU: the rejection loop has a data-dependent trip count, so a warp waits for its unluckiest lane. |
+| Ziggurat | **Measured 3.75x faster than Box-Muller on CPU** (see below). On GPU its rejection loop has a data-dependent trip count, and at the measured 2.73% slow-path rate only 41% of 32-lane warps stay entirely on the fast path — so the advantage is likely eaten there, though that is reasoning and not a measurement. |
 | Marsaglia polar | Same rejection problem. |
-| **Box-Muller** | Fine. `log`, `sqrt`, `sincos` all have hardware approximations (SFU, typically quarter rate). Fixed cost, no divergence. Used here. |
+| **Box-Muller** | Fine, and **slower than ziggurat on CPU by 3.75x**. `log`, `sqrt`, `sincos` all have hardware approximations (SFU, typically quarter rate). Fixed cost, no divergence, vectorises trivially. Used here. |
 | **Inverse CDF / probit** | Structurally the most GPU-friendly: one uniform in, one normal out, no pairing and nothing to cache. Costs being an approximation — Acklam is ~1e-9 relative, Wichura AS241 ~1e-16 for more polynomial. Worth switching to if the pairing ever becomes awkward. |
 | Sum of uniforms (CLT) | Cheapest and wrong. Passes variance and correlation, fails the tails — `test_synth_statistics`' kurtosis check exists to reject exactly this. |
 
@@ -135,6 +135,68 @@ it.
 project. The claims above are about the shape of the code — no state, no
 rejection, 32-bit integer arithmetic, fixed instruction count per draw — not
 measurements. Filed as `issues/008-gpu-port.md`.
+
+### Ziggurat, measured
+
+The table above originally called ziggurat "fastest on CPU, worst on GPU" from
+general knowledge. Both halves were then measured, and the first half is
+understated while the second is overstated.
+
+4,000,000 draws, min of 7, Marsaglia-Tsang 128-level ziggurat driven by the
+*same* `synth_hash` bit source so the comparison isolates the transform:
+
+| | ns/draw | vs ziggurat |
+|---|---|---|
+| ziggurat | **7.93** | — |
+| Box-Muller, both halves consumed (how `synth_rows` calls it) | 29.73 | 3.75x |
+| Box-Muller, single draw, half discarded | 55.53 | 7.0x |
+
+The ziggurat output was checked before being timed, because a fast wrong
+generator is worthless: mean `-0.00037`, sd `1.00082`, skew `+0.0046`, excess
+kurtosis `-0.0004`.
+
+**So ziggurat is decisively faster on CPU.** At `k = 5` the Gaussian transform is
+about 73% of generation cost, so adopting it would roughly halve `synth_rows`
+(230 ns/row down to about 110 ns/row), which would put generation level with the
+OLS accumulate it feeds rather than at twice its cost.
+
+**It is also better in one respect that has nothing to do with speed:** the
+ziggurat tail is sampled by exponential rejection and is therefore unbounded,
+where Box-Muller from a 53-bit uniform truncates at about 8.5 sigma.
+
+**Three things it costs, which is why it has not simply been adopted:**
+
+1. *Resolution.* The classic ziggurat derives the value from one 32-bit word, so
+   a draw carries at most 32 bits of entropy against the 53 currently used. Not
+   wrong, but coarser, and this is an `f64` library.
+2. *State.* The tables are `128 x (u32 + 2 x f64)` = 2560 bytes, and they need
+   `exp`/`log` to build, so they cannot be compile-time constants in Odin. Today
+   `src/synth` has no global state at all. The consistent home would be the
+   caller's `synth_scratch` block, growing it by 2560 bytes — workable, but it
+   is real state where there is currently none.
+3. *Vectorisation.* Ziggurat's table access is a per-lane gather and its accept
+   test is per-lane, so it does not vectorise; Box-Muller does. This machine has
+   AVX-512. **A vectorised Box-Muller was not measured**, and could close a
+   meaningful part of the 3.75x — so the gap above is for scalar code only.
+
+**On GPU the claim was too strong.** The measured slow-path rate is 2.73%, so
+`P(all 32 lanes fast) = 0.988^32`-style arithmetic gives **0.412** — 58.8% of
+warps contain at least one diverging lane, and the whole warp then pays the slow
+path (a `log` or an `exp` plus extra draws) on top of the fast one. That is a
+real penalty, plausibly enough to erase a 3.75x scalar lead, but "worst on GPU"
+overstated it: the slow path is a few extra operations, not a long loop, and
+published results are mixed. Calling it *uncertain on GPU* is the defensible
+position, and it stays uncertain until somebody measures it on hardware.
+
+**Ziggurat is compatible with the counter-based design.** This was checked rather
+than assumed: reserving 8 hash slots per draw (`index*8 + attempt`) keeps
+`zig_normal(seed, stream, index)` a pure function of its index despite the
+rejection loop, so row-addressability and reproducibility would survive the
+switch. Statelessness is not an argument against it.
+
+Recorded in `issues/009-ziggurat.md`. Not adopted, because generation is on no
+shipped hot path and the resolution and state costs are real; the measurements
+are here so the decision can be made on data rather than reputation.
 
 ### Cost of statelessness, measured
 
