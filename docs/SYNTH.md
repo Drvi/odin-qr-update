@@ -102,7 +102,7 @@ divergence:
 
 | method | GPU verdict |
 |---|---|
-| Ziggurat | **Measured 3.75x faster than Box-Muller on CPU** (see below). On GPU its rejection loop has a data-dependent trip count, and at the measured 2.73% slow-path rate only 41% of 32-lane warps stay entirely on the fast path — so the advantage is likely eaten there, though that is reasoning and not a measurement. |
+| Ziggurat | Measured 3.75x faster than *scalar* Box-Muller, but **slower than vectorised Box-Muller** (7.93 vs 4.86 ns/draw; see below). On GPU its rejection loop has a data-dependent trip count, and at the measured 2.73% slow-path rate only 41% of 32-lane warps stay entirely on the fast path — so the advantage is likely eaten there, though that is reasoning and not a measurement. |
 | Marsaglia polar | Same rejection problem. |
 | **Box-Muller** | Fine, and **slower than ziggurat on CPU by 3.75x**. `log`, `sqrt`, `sincos` all have hardware approximations (SFU, typically quarter rate). Fixed cost, no divergence, vectorises trivially. Used here. |
 | **Inverse CDF / probit** | Structurally the most GPU-friendly: one uniform in, one normal out, no pairing and nothing to cache. Costs being an approximation — Acklam is ~1e-9 relative, Wichura AS241 ~1e-16 for more polynomial. Worth switching to if the pairing ever becomes awkward. |
@@ -197,6 +197,128 @@ switch. Statelessness is not an argument against it.
 Recorded in `issues/009-ziggurat.md`. Not adopted, because generation is on no
 shipped hot path and the resolution and state costs are real; the measurements
 are here so the decision can be made on data rather than reputation.
+
+### Vectorised Box-Muller, measured
+
+Written after the ziggurat result, to test whether the 3.75x gap was really
+about the algorithm or just about scalar code. It was mostly the latter.
+
+Eight lanes (`#simd[8]f64`), same counter-based `synth_hash` so draws stay
+addressable, with **hand-written vector `ln` and `sincos`** because there is no
+vector libm available. Those are the risk: a polynomial that is slightly wrong
+yields numbers that still look Gaussian to a moment check and are not. So the
+transform was validated before the distribution, and the distribution was
+validated with a negative control.
+
+**Accuracy of the vector transcendentals**, against libm over the domain
+Box-Muller actually uses (`u` swept log-uniformly from `1e-300` to `1`):
+
+| | worst error |
+|---|---|
+| `vln` | **2.0 ULP** (at `x = 2.07e-2`) |
+| `vcos(2*pi*u)` | 6.66e-16 absolute |
+| `vsin(2*pi*u)` | 7.22e-16 absolute |
+
+**Agreement with the scalar generator**, same seed and same indices, 1,000,000
+draws: max absolute difference **3.0e-15**, max relative difference 3.8e-11
+(that figure is for deviates near zero, where relative error is meaningless);
+60.6% of lanes differ in the last bits, as expected from a different but
+equally valid evaluation order.
+
+**Throughput**, 4,000,000 draws, min of 7:
+
+| | ns/draw |
+|---|---|
+| **vectorised Box-Muller, `-microarch:native` (AVX-512)** | **4.86** |
+| vectorised Box-Muller, baseline ISA | 9.40 |
+| scalar Box-Muller, both halves consumed | 26.79 |
+| scalar ziggurat (from the section above) | 7.93 |
+
+**So vectorising Box-Muller beats scalar ziggurat by 1.63x on this machine**,
+and is 5.51x faster than the scalar Box-Muller it replaces. On baseline ISA
+without AVX-512 it lands at 9.40 ns, roughly level with ziggurat (1.19x slower).
+
+That answers the question the ziggurat section left open, and it answers it
+against ziggurat. Note the comparison is vectorised Box-Muller against *scalar*
+ziggurat: **no vectorised ziggurat was attempted**, because its table access is
+a per-lane gather and its accept test is per-lane, which is the same property
+that makes it awkward on a GPU. That is a reason to expect it to vectorise
+poorly, not a measurement.
+
+### The distributional battery, and why it has a negative control
+
+Speed is worthless if the samples are subtly wrong, and "subtly wrong" is
+exactly what a hand-written polynomial risks. Three samples of 5,000,000 were
+tested side by side:
+
+- **VEC** — the vectorised generator under evaluation
+- **SCALAR** — the generator already in the library, as the control for
+  *no worse than what we have*
+- **BROKEN** — the sum of twelve uniforms minus six. Mean 0 and variance 1
+  *exactly*, so it passes anything that stops at the second moment, but excess
+  kurtosis is `-0.1` and the support is clipped at `+/-6`. This is the control
+  for *the battery has power*. A battery that accepts all three measures
+  nothing.
+
+| statistic | VEC | SCALAR | BROKEN |
+|---|---|---|---|
+| z(mean) | 1.08 | 1.08 | -0.51 |
+| z(variance) | 0.11 | 0.11 | 1.31 |
+| z(skewness) | -0.07 | -0.07 | -0.52 |
+| z(excess kurtosis) | 0.40 | 0.40 | **-46.18** |
+| KS blocks rejected (of 50) | 0 | 0 | **4** |
+| KS p-value uniformity | 0.668 | 0.668 | **5.1e-19** |
+| Cramer-von Mises p-value uniformity | 0.615 | 0.615 | **1.6e-22** |
+| Anderson-Darling A^2, median (H0 ~0.78) | 0.754 | 0.754 | **2.865** |
+| A^2 blocks over the 1% point | 0 | 0 | **13** |
+| tail z at \|z\|>1 | 0.11 | 0.11 | **20.24** |
+| tail z at \|z\|>3 | -0.65 | -0.65 | **-28.67** |
+| tail z at \|z\|>4 | 1.20 | 1.20 | **-12.80** |
+| max \|z\| (expected ~5.20) | 5.714 | 5.714 | 4.727 |
+| autocorrelation, lags 1..64 | all < 3e-4 | all < 3e-4 | all < 4e-4 |
+| corr(Box-Muller pair halves) | -0.00002 | -0.00002 | -0.00098 |
+| KS(radius^2 vs chi2(2)) p | 0.406 | 0.406 | **6.3e-10** |
+| chi-square, 256 bins, p | 0.866 | 0.866 | **2.3e-255** |
+
+Four things worth drawing out.
+
+**VEC and SCALAR agree to every digit shown, on every statistic.** With a
+maximum absolute difference of 3.0e-15 between them that is what should happen,
+and confirming it is the point: the vectorised transform is not merely
+*acceptable*, it is indistinguishable from the reference.
+
+**The broken control passes mean, variance and skewness.** Every one of those
+z-scores is under 1.4. It is caught only by kurtosis, by the tails, by the
+distributional tests and by the radius check. That is the entire argument for
+having them, and it is why `test_synth_statistics`' kurtosis bound was worth
+adding earlier.
+
+**Single giant tests were deliberately avoided.** A KS test over 5,000,000
+points is powerful enough to reject on floating-point discreteness alone, which
+says nothing useful. The battery instead runs KS and Cramer-von Mises on 50
+independent blocks of 100,000 and then asks whether the resulting p-values are
+themselves Uniform(0,1) — which separates "this sample is not normal" from
+"this sample is large".
+
+**The radius check tests the joint distribution, not the marginals.** For a
+genuine Box-Muller pair `x^2 + y^2` must be `chi2(2)`; a generator with correct
+marginals but a mis-distributed angle would fail here and pass everything else.
+
+The battery is `tools/normal_battery.py` (scipy). The subset with demonstrated
+power — kurtosis, tail exceedances, pair correlation, radius, and the negative
+control — is reproduced in Odin as
+`tests/test_synth.odin:test_synth_distribution_battery`, so it runs on every
+build rather than only when someone remembers to.
+
+**Not adopted into `src/synth` yet**, and the reason is structural rather than
+numerical. `synth_rows` draws `k` normals per row with `k` typically 3-10, so
+filling 8 lanes requires vectorising *across* rows: generating a block of rows'
+draws into scratch first, then doing the per-row Cholesky and term expansion.
+That is a bounded change but it grows `synth_scratch(k)` — a published contract —
+and adds ~200 lines of hand-written numerics to a library that currently has
+none. Generation is on no shipped hot path. The working implementation is kept
+at `tools/vecbm_reference.odin.txt` with its validation harness; see
+`issues/010-vectorised-box-muller.md`.
 
 ### Cost of statelessness, measured
 

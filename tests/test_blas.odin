@@ -653,6 +653,7 @@ main :: proc() {
         {"sigma leaves X alone", test_synth_sigma_leaves_x_alone},
         {"rows addressable", test_synth_row_addressable},
         {"hash independence", test_synth_stream_independence},
+        {"distribution battery", test_synth_distribution_battery},
     }) {
         if t.fn() {passed += 1} else {failed += 1}
     }

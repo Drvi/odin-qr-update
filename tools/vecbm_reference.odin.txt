@@ -1,0 +1,227 @@
+package vbm
+
+// Vectorised Box-Muller: 8 normals at a time on AVX-512, driven by the same
+// counter-based synth_hash so results are addressable exactly as the scalar
+// version is.
+//
+// The transcendentals have to be written by hand -- there is no vector libm
+// here -- which is the whole risk of this exercise. A polynomial that is
+// slightly wrong produces numbers that still look Gaussian to a moment check
+// and are not. Everything below is therefore measured against libm in ULP, and
+// the distribution is put through a full goodness-of-fit battery with a
+// deliberately-broken generator as a negative control.
+
+import "core:math"
+import "core:simd"
+
+W :: 8
+F :: #simd[W]f64
+U :: #simd[W]u32
+U64 :: #simd[W]u64
+I64 :: #simd[W]i64
+
+// --- polynomial coefficients (generated; see coeffs.py in the bench dir) ---
+SP0 :: +1.57079632679489656e+00
+SP1 :: -6.45964097506246171e-01
+SP2 :: +7.96926262461670337e-02
+SP3 :: -4.68175413531868659e-03
+SP4 :: +1.60441184787359748e-04
+SP5 :: -3.59884323521208391e-06
+SP6 :: +5.69217292196792403e-08
+SP7 :: -6.68803510981146354e-10
+SP8 :: +6.06693573110619230e-12
+
+CP0 :: +1.00000000000000000e+00
+CP1 :: -1.23370055013616975e+00
+CP2 :: +2.53669507901047975e-01
+CP3 :: -2.08634807633529575e-02
+CP4 :: +9.19260274839426260e-04
+CP5 :: -2.52020423730605965e-05
+CP6 :: +4.71087477881816909e-07
+CP7 :: -6.38660308379184878e-09
+CP8 :: +6.56596311497946763e-11
+
+LN2 :: +6.93147180559945286e-01
+SQRT2 :: +1.41421356237309515e+00
+
+// ============================================================================
+// Vector hash: splitmix32 twice, same constants as synth_hash
+// ============================================================================
+
+@(private)
+vsplitmix32 :: #force_inline proc "contextless" (b: U) -> U {
+	x := b
+	x += U(0x9E3779B9)
+	x ~= simd.shr(x, U(15))
+	x *= U(0x85EBCA6B)
+	x ~= simd.shr(x, U(13))
+	x *= U(0xC2B2AE3D)
+	x ~= simd.shr(x, U(16))
+	return x
+}
+
+vhash :: #force_inline proc "contextless" (seed: u32, stream: u32, index: U) -> U {
+	h := U(seed)
+	h += index * U(0x9E3779B9)
+	h ~= U(stream) * U(0x85EBCA6B)
+	return vsplitmix32(vsplitmix32(h))
+}
+
+// ============================================================================
+// Vector ln(x) for x in (0, 1]
+// ============================================================================
+//
+// x = m * 2^e with m in [sqrt(2)/2, sqrt(2)), then
+//   ln(x) = e*ln2 + 2*t*(1 + t^2/3 + t^4/5 + ...),  t = (m-1)/(m+1)
+// The mantissa is rebuilt by bit surgery, so there is no branch and no table.
+
+vln :: proc "contextless" (x: F) -> F {
+	bits := transmute(U64)x
+	// unbiased exponent
+	e_raw := simd.shr(bits, U64(52)) & U64(0x7FF)
+	e := cast(F)(transmute(I64)e_raw) - F(1023.0)
+	// mantissa forced into [1,2)
+	m := transmute(F)((bits & U64(0x000FFFFFFFFFFFFF)) | U64(0x3FF0000000000000))
+
+	// If m >= sqrt(2), halve it and bump the exponent: puts t in a tighter
+	// range so the series converges in fewer terms.
+	big := simd.lanes_ge(m, F(SQRT2))
+	m = simd.select(big, m * F(0.5), m)
+	e = simd.select(big, e + F(1.0), e)
+
+	t := (m - F(1.0)) / (m + F(1.0))
+	w := t * t
+
+	// Horner over the odd-reciprocal series, high order first.
+	p := F(4.76190476190476164e-02)
+	p = p * w + F(5.26315789473684181e-02)
+	p = p * w + F(5.88235294117647051e-02)
+	p = p * w + F(6.66666666666666657e-02)
+	p = p * w + F(7.69230769230769273e-02)
+	p = p * w + F(9.09090909090909116e-02)
+	p = p * w + F(1.11111111111111105e-01)
+	p = p * w + F(1.42857142857142849e-01)
+	p = p * w + F(2.00000000000000011e-01)
+	p = p * w + F(3.33333333333333315e-01)
+	p = p * w + F(1.0)
+
+	return e * F(LN2) + F(2.0) * t * p
+}
+
+// ============================================================================
+// Vector cos/sin of 2*pi*u for u in (0,1)
+// ============================================================================
+//
+// Work in quarter turns: 2*pi*u = (pi/2) * (4u). Reduce 4u to n + d with n an
+// integer and |d| <= 0.5, evaluate sin/cos of (pi/2)*d by polynomial, then let
+// n mod 4 pick which of +/-sin, +/-cos each output is. Reducing in quarter
+// turns keeps the polynomial argument under pi/4 and avoids ever multiplying
+// by pi, so there is no argument-reduction error to speak of.
+
+vsincos_2pi :: proc "contextless" (u: F) -> (c_out: F, s_out: F) {
+	q := u * F(4.0)
+	n := simd.floor(q + F(0.5)) // nearest integer
+	d := q - n // |d| <= 0.5
+
+	w := d * d
+
+	// sin(pi*d/2) = d * SP(w)
+	sp := F(SP8)
+	sp = sp * w + F(SP7)
+	sp = sp * w + F(SP6)
+	sp = sp * w + F(SP5)
+	sp = sp * w + F(SP4)
+	sp = sp * w + F(SP3)
+	sp = sp * w + F(SP2)
+	sp = sp * w + F(SP1)
+	sp = sp * w + F(SP0)
+	sn := d * sp
+
+	// cos(pi*d/2) = CP(w)
+	cp := F(CP8)
+	cp = cp * w + F(CP7)
+	cp = cp * w + F(CP6)
+	cp = cp * w + F(CP5)
+	cp = cp * w + F(CP4)
+	cp = cp * w + F(CP3)
+	cp = cp * w + F(CP2)
+	cp = cp * w + F(CP1)
+	cp = cp * w + F(CP0)
+	cs := cp
+
+	// n mod 4 selects the octant. cos(x + n*pi/2) cycles c, -s, -c, s and
+	// sin cycles s, c, -s, -c.
+	ni := cast(I64)n
+	k := transmute(U64)ni & U64(3)
+
+	k0 := simd.lanes_eq(k, U64(0))
+	k1 := simd.lanes_eq(k, U64(1))
+	k2 := simd.lanes_eq(k, U64(2))
+
+	c_out = simd.select(k0, cs, simd.select(k1, -sn, simd.select(k2, -cs, sn)))
+	s_out = simd.select(k0, sn, simd.select(k1, cs, simd.select(k2, -sn, -cs)))
+	return
+}
+
+// ============================================================================
+// The generator
+// ============================================================================
+
+// Uniform in (0,1) with 53 bits, from two hashes -- same construction as the
+// scalar version so tail depth matches.
+@(private)
+vuniform53 :: #force_inline proc "contextless" (seed, stream: u32, index: U) -> F {
+	hi := cast(U64)vhash(seed, stream, index * U(2))
+	lo := cast(U64)vhash(seed, stream, index * U(2) + U(1))
+	bits := simd.shl(hi, U64(21)) | simd.shr(lo, U64(11))
+	return (cast(F)(transmute(I64)bits) + F(0.5)) * F(1.0 / 9007199254740992.0)
+}
+
+@(private)
+vuniform32 :: #force_inline proc "contextless" (seed, stream: u32, index: U) -> F {
+	h := cast(U64)vhash(seed, stream, index)
+	return (cast(F)(transmute(I64)h) + F(0.5)) * F(1.0 / 4294967296.0)
+}
+
+// vnormal_pairs returns 8 pairs of standard normals for 8 consecutive pair
+// indices. Identical construction to synth_normal_pair, lane for lane.
+vnormal_pairs :: proc "contextless" (seed, stream: u32, pair_index: U) -> (F, F) {
+	u1 := vuniform53(seed, stream, pair_index * U(2))
+	u2 := vuniform32(seed, stream ~ 0x5BF03635, pair_index)
+	mag := simd.sqrt(F(-2.0) * vln(u1))
+	c, s := vsincos_2pi(u2)
+	return mag * c, mag * s
+}
+
+// vnormals fills `out` with `count` standard normals, draw index i taken from
+// pair i/2 exactly as synth_normal defines it. count need not be a multiple of
+// the vector width.
+vnormals :: proc "contextless" (seed, stream: u32, first_draw: int, out: []f64) {
+	n := len(out)
+	i := 0
+	// Each vector iteration produces 2*W draws: W pairs, both halves.
+	for i + 2 * W <= n {
+		base := u32((first_draw + i) / 2)
+		idx: U
+		for l in 0 ..< W {
+			idx = simd.replace(idx, l, base + u32(l))
+		}
+		a, b := vnormal_pairs(seed, stream, idx)
+		for l in 0 ..< W {
+			out[i + 2 * l] = simd.extract(a, l)
+			out[i + 2 * l + 1] = simd.extract(b, l)
+		}
+		i += 2 * W
+	}
+	// scalar tail
+	for ; i < n; i += 1 {
+		d := u32(first_draw + i)
+		idx: U
+		idx = simd.replace(idx, 0, d / 2)
+		a, b := vnormal_pairs(seed, stream, idx)
+		out[i] = d % 2 == 0 ? simd.extract(a, 0) : simd.extract(b, 0)
+	}
+}
+
+// Scalar references, for the ULP comparison.
+sln :: proc(x: f64) -> f64 {return math.ln_f64(x)}

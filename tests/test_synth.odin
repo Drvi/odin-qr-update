@@ -10,6 +10,7 @@ package tests
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:slice"
 import "../src/blas"
 import "../src/synth"
 
@@ -1003,5 +1004,194 @@ test_synth_stream_independence :: proc() -> bool {
 	}
 	fmt.printf("    hash uniformity chi2 = %.1f on 63 df (99.9%% point 112)\n", chi2)
 	fmt.println("  PASSED")
+	return true
+}
+
+// ============================================================================
+// Distributional battery, with a negative control
+// ============================================================================
+//
+// The moment checks in test_synth_statistics stop at the fourth moment. These
+// go further, into the places a subtly-wrong transform actually shows up: the
+// tails, the joint distribution of a Box-Muller pair, and the bulk shape.
+//
+// The last section is the important one. It runs the same checks against a
+// DELIBERATELY BROKEN generator -- the sum of twelve uniforms, which has mean 0
+// and variance 1 exactly -- and asserts that they REJECT it. A battery that
+// only ever passes is not evidence of anything. The external version of this,
+// tools/normal_battery.py, adds Kolmogorov-Smirnov, Cramer-von Mises and
+// Anderson-Darling via scipy; the results are in docs/SYNTH.md.
+
+@(private = "file")
+Dist_Stats :: struct {
+	n:       int,
+	mean:    f64,
+	sd:      f64,
+	exkurt:  f64,
+	pair_r:  f64, // correlation between the two halves of each B-M pair
+	ks_r2:   f64, // KS statistic of radius^2 against Exponential(1/2)
+	tail_z:  [4]f64, // exceedance z-scores at |z| > 1,2,3,4
+}
+
+// Exact two-sided normal exceedance probabilities P(|Z| > t) for t = 1..4.
+@(private = "file")
+TAIL_P := [4]f64 {
+	3.17310507862914348e-01,
+	4.55002638963585509e-02,
+	2.69979606326019519e-03,
+	6.33424836662175077e-05,
+}
+
+@(private = "file")
+analyse :: proc(x: []f64, r2: []f64) -> Dist_Stats {
+	n := len(x)
+	s: Dist_Stats
+	s.n = n
+
+	for v in x {s.mean += v}
+	s.mean /= f64(n)
+	m2, m4 := 0.0, 0.0
+	for v in x {
+		d := v - s.mean
+		d2 := d * d
+		m2 += d2
+		m4 += d2 * d2
+	}
+	s.sd = math.sqrt_f64(m2 / f64(n - 1))
+	v2 := m2 / f64(n)
+	s.exkurt = (m4 / f64(n)) / (v2 * v2) - 3.0
+
+	// Exceedance z-scores against the binomial standard error.
+	for t, ti in ([4]f64{1, 2, 3, 4}) {
+		obs := 0
+		for v in x {
+			if abs(v) > t {obs += 1}
+		}
+		p := TAIL_P[ti]
+		expect := f64(n) * p
+		se := math.sqrt_f64(f64(n) * p * (1.0 - p))
+		s.tail_z[ti] = (f64(obs) - expect) / se
+	}
+
+	// Pair structure: halves are cos and sin of one angle, so they must be
+	// uncorrelated, and x^2+y^2 must be Exponential(1/2) = chi-square with 2 df.
+	np := n / 2
+	ma, mb := 0.0, 0.0
+	for i in 0 ..< np {
+		ma += x[2 * i]
+		mb += x[2 * i + 1]
+	}
+	ma /= f64(np);mb /= f64(np)
+	sab, saa, sbb := 0.0, 0.0, 0.0
+	for i in 0 ..< np {
+		da := x[2 * i] - ma
+		db := x[2 * i + 1] - mb
+		sab += da * db
+		saa += da * da
+		sbb += db * db
+	}
+	s.pair_r = sab / math.sqrt_f64(saa * sbb)
+
+	for i in 0 ..< np {r2[i] = x[2 * i] * x[2 * i] + x[2 * i + 1] * x[2 * i + 1]}
+	slice.sort(r2[:np])
+	d := 0.0
+	for i in 0 ..< np {
+		cdf := 1.0 - math.exp_f64(-0.5 * r2[i])
+		lo := f64(i) / f64(np)
+		hi := f64(i + 1) / f64(np)
+		d = max(d, abs(cdf - lo), abs(hi - cdf))
+	}
+	s.ks_r2 = d
+	return s
+}
+
+test_synth_distribution_battery :: proc() -> bool {
+	fmt.println("Testing distributional properties, with a negative control...")
+
+	N :: 400_000
+	x := make([]f64, N);defer delete(x)
+	r2 := make([]f64, N / 2);defer delete(r2)
+
+	// --- the generator under test ---
+	for i in 0 ..< N {x[i] = synth.synth_normal(20260819, synth.STREAM_BASE, u32(i))}
+	good := analyse(x, r2)
+
+	// KS 0.1% critical value for a fully specified distribution.
+	ks_crit := 1.95 / math.sqrt_f64(f64(N / 2))
+	// Standard errors of the moment estimates at this N.
+	se_mean := 1.0 / math.sqrt_f64(f64(N))
+	se_kurt := math.sqrt_f64(24.0 / f64(N))
+	se_corr := 1.0 / math.sqrt_f64(f64(N / 2))
+
+	fmt.printf("    mean z %+.2f   sd %.5f   exkurt z %+.2f\n",
+		good.mean / se_mean, good.sd, good.exkurt / se_kurt)
+	fmt.printf("    tail z  1s %+.2f  2s %+.2f  3s %+.2f  4s %+.2f\n",
+		good.tail_z[0], good.tail_z[1], good.tail_z[2], good.tail_z[3])
+	fmt.printf("    pair corr %+.5f (se %.5f)   KS(r2, chi2_2) %.5f (crit %.5f)\n",
+		good.pair_r, se_corr, good.ks_r2, ks_crit)
+
+	if abs(good.mean / se_mean) > 4.0 {
+		fmt.println("  FAILED: mean off")
+		return false
+	}
+	if abs(good.sd - 1.0) > 4.0 * math.sqrt_f64(0.5 / f64(N)) {
+		fmt.println("  FAILED: sd off")
+		return false
+	}
+	if abs(good.exkurt / se_kurt) > 4.0 {
+		fmt.println("  FAILED: kurtosis off")
+		return false
+	}
+	for z, i in good.tail_z {
+		if abs(z) > 4.0 {
+			fmt.printf("  FAILED: tail %d sigma z = %+.2f\n", i + 1, z)
+			return false
+		}
+	}
+	if abs(good.pair_r / se_corr) > 4.0 {
+		fmt.println("  FAILED: Box-Muller pair halves are correlated")
+		return false
+	}
+	if good.ks_r2 > ks_crit {
+		fmt.println("  FAILED: radius^2 is not chi-square with 2 df")
+		return false
+	}
+
+	// --- negative control: does the battery actually have power? ---
+	// Sum of twelve uniforms minus six. Mean 0 and variance 1 exactly, so it
+	// passes anything that stops at the second moment, but excess kurtosis is
+	// -0.1 and the support is clipped at +/-6.
+	for i in 0 ..< N {
+		s := 0.0
+		for j in 0 ..< 12 {
+			h := synth.synth_hash(7, 3, u32(i) * 12 + u32(j))
+			s += (f64(h) + 0.5) * (1.0 / 4294967296.0)
+		}
+		x[i] = s - 6.0
+	}
+	bad := analyse(x, r2)
+	fmt.printf("    control: mean z %+.2f   sd %.5f   exkurt z %+.2f   3s tail z %+.2f\n",
+		bad.mean / se_mean, bad.sd, bad.exkurt / se_kurt, bad.tail_z[2])
+
+	// It must pass the cheap checks -- otherwise it is not a fair control.
+	if abs(bad.mean / se_mean) > 4.0 || abs(bad.sd - 1.0) > 0.01 {
+		fmt.println("  FAILED: control is not mean-0 variance-1, so it proves nothing")
+		return false
+	}
+	// And it must be caught by the checks that matter.
+	if abs(bad.exkurt / se_kurt) <= 4.0 {
+		fmt.println("  FAILED: kurtosis check did not reject the broken control")
+		return false
+	}
+	if abs(bad.tail_z[2]) <= 4.0 {
+		fmt.println("  FAILED: 3-sigma tail check did not reject the broken control")
+		return false
+	}
+	if bad.ks_r2 <= ks_crit {
+		fmt.println("  FAILED: radius check did not reject the broken control")
+		return false
+	}
+
+	fmt.println("  PASSED (generator clean; broken control rejected by kurtosis, tails and radius)")
 	return true
 }

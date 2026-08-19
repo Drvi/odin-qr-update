@@ -32,10 +32,15 @@ Compatible with counter-based indexing: verified that reserving 8 hash slots per
 draw (index*8 + attempt) keeps zig_normal(seed, stream, index) a pure function
 despite the rejection loop, so addressability and reproducibility survive.
 
-Not adopted: generation is on no shipped hot path measured in
-docs/OLS_RESULTS.md, and the resolution and state costs are concrete while the
-speed requirement is not. Revisit if bulk generation ever becomes the bottleneck
--- and measure a vectorised Box-Muller in the same breath.
+RESOLVED AGAINST ZIGGURAT. The vectorised Box-Muller called for above was then
+built and measured: 4.86 ns/draw with AVX-512, against ziggurat's 7.93. So the
+3.75x gap was mostly scalar code rather than the algorithm, and the faster
+option is also the one with 53-bit resolution, no tables and no divergence. See
+issues/010-vectorised-box-muller.md.
+
+Ziggurat is not adopted. It would still be the better choice on hardware
+without AVX-512, where vectorised Box-Muller lands at 9.40 ns/draw and is
+1.19x slower -- worth remembering if the target ever changes.
 
 The benchmark implementation is not in the repository. Reproduce it from
 Marsaglia & Tsang (2000) "The Ziggurat Method for Generating Random Variables",
