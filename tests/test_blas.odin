@@ -654,6 +654,8 @@ main :: proc() {
         {"rows addressable", test_synth_row_addressable},
         {"hash independence", test_synth_stream_independence},
         {"distribution battery", test_synth_distribution_battery},
+        {"multivariate normal", test_synth_mvn},
+        {"mvn matches synth_rows", test_synth_mvn_matches_synth_rows},
     }) {
         if t.fn() {passed += 1} else {failed += 1}
     }

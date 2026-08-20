@@ -320,6 +320,130 @@ none. Generation is on no shipped hot path. The working implementation is kept
 at `tools/vecbm_reference.odin.txt` with its validation harness; see
 `issues/010-vectorised-box-muller.md`.
 
+## Are Box-Muller and ziggurat equal quality?
+
+On everything measurable here, yes. The full battery was re-run with a fourth
+stream — the Marsaglia-Tsang ziggurat, driven by the same `synth_hash`:
+
+| statistic | VEC | SCALAR | ZIG | BROKEN |
+|---|---|---|---|---|
+| z(excess kurtosis) | 0.40 | 0.40 | **-0.04** | -46.18 |
+| KS blocks rejected (of 50) | 0 | 0 | **0** | 4 |
+| KS p-value uniformity | 0.668 | 0.668 | **0.747** | 5.1e-19 |
+| CvM p-value uniformity | 0.615 | 0.615 | **0.807** | 1.6e-22 |
+| A^2 median (H0 ~0.78) | 0.754 | 0.754 | **0.742** | 2.865 |
+| tail z at \|z\|>3 | -0.65 | -0.65 | **-0.63** | -28.67 |
+| tail z at \|z\|>4 | 1.20 | 1.20 | **1.20** | -12.80 |
+| KS(radius^2 vs chi2(2)) p | 0.406 | 0.406 | **0.394** | 6.3e-10 |
+| chi-square, 256 bins, p | 0.866 | 0.866 | **0.756** | 2.3e-255 |
+
+Two further tests were run specifically to separate them, since the standard
+battery is not sensitive to the ways they actually differ.
+
+**Resolution.** Box-Muller here builds its magnitude uniform from 53 bits; the
+classic ziggurat derives its value from a single 32-bit word. That sounds like a
+21-bit deficit, and an earlier note in `issues/009` said so — **it was
+overstated**. The value is `hz * wn[iz]`, and the per-strip scale `wn[iz]`
+differs across 128 strips, so the reachable value set is nearer `2^39` than
+`2^32`. Counting exact ties in 5,000,000 samples: **zero for all three
+generators**. The difference is real in principle and undetectable at this
+sample size.
+
+**Strip-index dependence.** Doornik (2005) criticised the classic ziggurat for
+taking the strip index from the low 7 bits of the same word that supplies the
+value: with a generator whose low bits are weak, `|z|` becomes dependent on its
+own payload bits. Conditioning mean `|z|` on the low 7 bits of the mantissa
+across 128 buckets gives a maximum |z-score| of **3.57**, which for 128 buckets
+is about a 5% event — not significant. That is expected, since `synth_hash`'s
+low bits are as good as its high bits; it would not hold for the LCGs Doornik
+was writing about.
+
+What remains, and is *not* measurable at n = 5,000,000:
+
+- Ziggurat's tail is sampled by exponential rejection and so is unbounded;
+  Box-Muller from a 53-bit uniform truncates near 8.5 sigma. The largest
+  deviate seen in 5,000,000 draws was 5.71, so this cannot show up here.
+- Ziggurat's quality is contingent on the bit source's low bits. Box-Muller's
+  is not. That is an argument for Box-Muller in a library where the bit source
+  might be swapped.
+
+So: equal quality on the evidence, with Box-Muller the more robust of the two
+to a change of bit source, and ziggurat better in a tail regime no realistic
+sample size reaches.
+
+## Multivariate normal sampling, and which optimisations pay
+
+`synth_mvn_rows` generates `N(0, Sigma)` rows directly, `Sigma = D*corr*D`. It
+is the first half of `synth_rows` exposed on its own, and it uses the same
+global draw indexing, so the same seed gives the same base variables either way
+— `test_synth_mvn_matches_synth_rows` asserts bit-identity.
+
+Measured cost per row, 8,000,000/k rows per configuration, min of 5:
+
+| k | block=1 | block=64 | diagonal Sigma | diagonal speedup |
+|---|---|---|---|---|
+| 2 | 69.8 ns | 67.2 | 68.1 | 0.99x |
+| 4 | 135.9 | 134.2 | 134.0 | 1.00x |
+| 8 | 288.8 | 280.8 | 267.0 | 1.05x |
+| 16 | 603.5 | 599.8 | 516.3 | 1.16x |
+| 32 | 1383.0 | 1358.1 | 1017.4 | 1.33x |
+| 64 | 3654.5 | 3657.1 | 2008.9 | 1.82x |
+| 128 | 11819.5 | 11890.3 | 4055.2 | **2.93x** |
+
+**The diagonal fast path is the win, and only at larger k.** An identity
+correlation needs no matrix product at all, so the `O(k^2)` transform vanishes
+and only the `O(k)` draws remain. Below `k = 8` that buys nothing, because the
+Gaussian draws dominate completely; by `k = 128` the transform *is* the cost and
+removing it is worth 2.93x. It is detected at init, so callers who never asked
+for correlation get it without asking.
+
+**Row blocking buys essentially nothing — the hypothesis was wrong.** `block=64`
+against `block=1` is within 3% everywhere and marginally *slower* at `k >= 64`.
+The parameter is kept because it is the row buffer that a vectorised generator
+needs (`issues/010`), and because callers can set it to 1; but on today's code
+it is not a speed feature and is not documented as one.
+
+### The transform loop order has a crossover
+
+Isolating the `L*z` step, 64 rows, comparing the shipped `(i,a,b)` order against
+the `(a,b,i)` order that streams `L` once per block instead of once per row.
+Both accumulate along `b` in the same sequence, so they are bit-identical and
+the choice is purely about memory traffic:
+
+| k | (i,a,b) shipped | (a,b,i) | ratio |
+|---|---|---|---|
+| 4 | 12.2 ns/row | 10.1 | 1.21x |
+| 16 | 116.6 | 93.8 | 1.24x |
+| 32 | 448.6 | 348.7 | 1.29x |
+| 64 | 1961.2 | 1452.1 | 1.35x |
+| 128 | 8419.4 | **14692.4** | 0.57x |
+| 256 | 36303.2 | **97671.2** | 0.37x |
+
+The level-3 reuse argument holds up to `k = 64` and then inverts hard. At
+`k = 128` the 64-row output block is 64 KiB and no longer fits L1, so making
+`k^2/2` strided passes over it thrashes, while the shipped order keeps one input
+row and one output row hot and streams `L` instead.
+
+Not acted on. Switching order below the crossover is worth 4-14% end to end
+(the transform is only part of the per-row cost), it needs a `k`-dependent
+branch, and the crossover was measured on exactly one machine. The measurement
+is recorded so the decision is available; "always block for level-3 reuse" would
+have been the wrong lesson to take from it.
+
+### Optimisations not taken
+
+Filed in `issues/011-mvn-structured-covariance.md`:
+
+- **Equicorrelation** (`Sigma = (1-rho)I + rho*11^T`): sampling is
+  `x_i = sqrt(1-rho)*z_i + sqrt(rho)*w` with one shared `w`, so `O(k)` instead
+  of `O(k^2)` — the same class of win as the diagonal path, for a structure that
+  shows up constantly in test matrices.
+- **Low-rank plus diagonal** (`Sigma = Lambda*Lambda^T + Psi`): `O(k*r)`.
+- **Eigendecomposition instead of Cholesky**: same cost, but it accepts
+  positive *semi*-definite `Sigma`, which Cholesky rejects. A caller who wants
+  two perfectly correlated variables currently gets `.Not_Positive_Definite`,
+  which is correct but may not be what they wanted.
+
 ### Cost of statelessness, measured
 
 `k = 5`, 6 terms, 1,000,000 rows, min of 7, same machine as `docs/OLS_RESULTS.md`:

@@ -1195,3 +1195,221 @@ test_synth_distribution_battery :: proc() -> bool {
 	fmt.println("  PASSED (generator clean; broken control rejected by kurtosis, tails and radius)")
 	return true
 }
+
+// ============================================================================
+// Multivariate normal sampler
+// ============================================================================
+
+test_synth_mvn :: proc() -> bool {
+	fmt.println("Testing synth_mvn_rows...")
+
+	K :: 4
+	M :: 200_000
+	BLOCK :: 64
+	corr := [K * K]f64 {
+		1.00, 0.70, -0.40, 0.10,
+		0.70, 1.00, -0.20, 0.05,
+		-0.40, -0.20, 1.00, 0.60,
+		0.10, 0.05, 0.60, 1.00,
+	}
+	variance := [K]f64{4.0, 0.25, 9.0, 1.0}
+	SEED :: u32(20260819)
+
+	sc := make([]f64, synth.synth_mvn_scratch(K, BLOCK));defer delete(sc)
+	m: synth.Mvn
+	if e := synth.synth_mvn_init(&m, K, corr[:], variance[:], BLOCK, sc); e != .None {
+		fmt.printf("  FAILED: init %v\n", e)
+		return false
+	}
+	if m.diag {
+		fmt.println("  FAILED: a correlated Sigma was classified as diagonal")
+		return false
+	}
+
+	x := make([]f64, M * K);defer delete(x)
+	if e := synth.synth_mvn_rows(&m, SEED, 0, x, K, M); e != .None {
+		fmt.printf("  FAILED: rows %v\n", e)
+		return false
+	}
+
+	// Sample covariance must reproduce D*corr*D.
+	mean: [K]f64
+	for i in 0 ..< M {
+		for j in 0 ..< K {mean[j] += x[i * K + j]}
+	}
+	for j in 0 ..< K {mean[j] /= f64(M)}
+	cov: [K * K]f64
+	for i in 0 ..< M {
+		for a in 0 ..< K {
+			da := x[i * K + a] - mean[a]
+			for b in 0 ..< K {cov[a * K + b] += da * (x[i * K + b] - mean[b])}
+		}
+	}
+	for i in 0 ..< K * K {cov[i] /= f64(M - 1)}
+
+	worst_v, worst_c := 0.0, 0.0
+	for a in 0 ..< K {
+		worst_v = max(worst_v, abs(cov[a * K + a] / variance[a] - 1.0))
+		for b in 0 ..< K {
+			r := cov[a * K + b] / math.sqrt_f64(cov[a * K + a] * cov[b * K + b])
+			worst_c = max(worst_c, abs(r - corr[a * K + b]))
+		}
+	}
+	fmt.printf("    worst variance rel err %.4f, worst correlation err %.4f\n", worst_v, worst_c)
+	if worst_v > 0.03 || worst_c > 0.02 {
+		fmt.println("  FAILED: sample covariance does not match Sigma")
+		return false
+	}
+
+	// Blocking must change speed only. block=1 is the per-row path.
+	{
+		sc1 := make([]f64, synth.synth_mvn_scratch(K, 1));defer delete(sc1)
+		m1: synth.Mvn
+		synth.synth_mvn_init(&m1, K, corr[:], variance[:], 1, sc1)
+		x1 := make([]f64, 5000 * K);defer delete(x1)
+		synth.synth_mvn_rows(&m1, SEED, 0, x1, K, 5000)
+		for i in 0 ..< 5000 * K {
+			if x1[i] != x[i] {
+				fmt.printf("  FAILED: block=1 differs from block=%d at [%d]\n", BLOCK, i)
+				return false
+			}
+		}
+	}
+
+	// Rows are individually addressable and order-free, as for synth_rows.
+	{
+		one: [K]f64
+		for r in ([]int{0, 199_999, 1, 12_345, 64, 65}) {
+			if e := synth.synth_mvn_rows(&m, SEED, r, one[:], K, 1); e != .None {
+				fmt.printf("  FAILED: single row %d -> %v\n", r, e)
+				return false
+			}
+			for j in 0 ..< K {
+				if one[j] != x[r * K + j] {
+					fmt.printf("  FAILED: row %d col %d differs\n", r, j)
+					return false
+				}
+			}
+		}
+	}
+
+	// Diagonal Sigma takes the O(k) path and must still be correct.
+	{
+		id: [K * K]f64
+		for i in 0 ..< K {id[i * K + i] = 1.0}
+		scd := make([]f64, synth.synth_mvn_scratch(K, BLOCK));defer delete(scd)
+		md: synth.Mvn
+		if e := synth.synth_mvn_init(&md, K, id[:], variance[:], BLOCK, scd); e != .None {
+			fmt.printf("  FAILED: diagonal init %v\n", e)
+			return false
+		}
+		if !md.diag {
+			fmt.println("  FAILED: identity correlation was not detected as diagonal")
+			return false
+		}
+		xd := make([]f64, M * K);defer delete(xd)
+		synth.synth_mvn_rows(&md, SEED, 0, xd, K, M)
+		// Compare against the general path fed the same identity correlation.
+		scg := make([]f64, synth.synth_mvn_scratch(K, BLOCK));defer delete(scg)
+		mg: synth.Mvn
+		synth.synth_mvn_init(&mg, K, id[:], variance[:], BLOCK, scg)
+		mg.diag = false // force the general path
+		for i in 0 ..< K {
+			for j in 0 ..< K {
+				mg.chol[i * K + j] = i == j ? math.sqrt_f64(variance[i]) : 0.0
+			}
+		}
+		xg := make([]f64, 5000 * K);defer delete(xg)
+		synth.synth_mvn_rows(&mg, SEED, 0, xg, K, 5000)
+		for i in 0 ..< 5000 * K {
+			if abs(xd[i] - xg[i]) > 1e-15 * max(1.0, abs(xg[i])) {
+				fmt.printf("  FAILED: diagonal fast path differs at [%d]\n", i)
+				return false
+			}
+		}
+	}
+
+	// Boundaries.
+	{
+		bad: synth.Mvn
+		if e := synth.synth_mvn_init(&bad, 0, corr[:], variance[:], BLOCK, sc);
+		   e != .Invalid_Dimension {
+			fmt.printf("  FAILED: k=0 -> %v\n", e)
+			return false
+		}
+		if e := synth.synth_mvn_init(&bad, K, corr[:], variance[:], 0, sc);
+		   e != .Invalid_Dimension {
+			fmt.printf("  FAILED: block=0 -> %v\n", e)
+			return false
+		}
+		small := make([]f64, synth.synth_mvn_scratch(K, BLOCK) - 1);defer delete(small)
+		if e := synth.synth_mvn_init(&bad, K, corr[:], variance[:], BLOCK, small);
+		   e != .Scratch_Too_Small {
+			fmt.printf("  FAILED: short scratch -> %v\n", e)
+			return false
+		}
+		nonpd := [9]f64{1, 0.9, 0.9, 0.9, 1, -0.9, 0.9, -0.9, 1}
+		v3 := [3]f64{1, 1, 1}
+		s3 := make([]f64, synth.synth_mvn_scratch(3, BLOCK));defer delete(s3)
+		if e := synth.synth_mvn_init(&bad, 3, nonpd[:], v3[:], BLOCK, s3);
+		   e != .Not_Positive_Definite {
+			fmt.printf("  FAILED: inconsistent corr -> %v\n", e)
+			return false
+		}
+		if e := synth.synth_mvn_rows(&m, SEED, 0, x, K - 1, 10); e != .Invalid_Dimension {
+			fmt.printf("  FAILED: ldout < k -> %v\n", e)
+			return false
+		}
+		if e := synth.synth_mvn_rows(&m, SEED, 0, x, K, 0); e != .None {
+			fmt.printf("  FAILED: count=0 -> %v\n", e)
+			return false
+		}
+	}
+
+	fmt.println("  PASSED")
+	return true
+}
+
+test_synth_mvn_matches_synth_rows :: proc() -> bool {
+	fmt.println("Testing Mvn reproduces the base variables synth_rows uses...")
+
+	// synth_rows with linear-only terms yields exactly the base variables, so
+	// the two paths must agree bit for bit. That is what makes Mvn usable as
+	// "the first half of synth_rows" rather than a lookalike.
+	K :: 3
+	M :: 3000
+	corr := [K * K]f64{1, 0.5, -0.25, 0.5, 1, 0.3, -0.25, 0.3, 1}
+	variance := [K]f64{2.0, 0.5, 1.5}
+	terms := [K * K]u8{1, 0, 0, 0, 1, 0, 0, 0, 1}
+	coef := [K]f64{0, 0, 0}
+	SEED :: u32(4242)
+
+	s1 := make([]f64, synth.synth_scratch(K));defer delete(s1)
+	spec: synth.Spec
+	if e := synth.synth_init(&spec, K, corr[:], variance[:], terms[:], coef[:], 0.0, s1);
+	   e != .None {
+		fmt.printf("  FAILED: synth_init %v\n", e)
+		return false
+	}
+	xa := make([]f64, M * K);defer delete(xa)
+	ya := make([]f64, M);defer delete(ya)
+	synth.synth_rows(&spec, SEED, 0, xa, K, ya, M)
+
+	s2 := make([]f64, synth.synth_mvn_scratch(K, 64));defer delete(s2)
+	mv: synth.Mvn
+	if e := synth.synth_mvn_init(&mv, K, corr[:], variance[:], 64, s2); e != .None {
+		fmt.printf("  FAILED: mvn_init %v\n", e)
+		return false
+	}
+	xb := make([]f64, M * K);defer delete(xb)
+	synth.synth_mvn_rows(&mv, SEED, 0, xb, K, M)
+
+	for i in 0 ..< M * K {
+		if xa[i] != xb[i] {
+			fmt.printf("  FAILED: differ at [%d]: %.17e vs %.17e\n", i, xa[i], xb[i])
+			return false
+		}
+	}
+	fmt.println("  PASSED (bit-identical)")
+	return true
+}

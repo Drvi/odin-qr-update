@@ -44,7 +44,7 @@ def moments(samples):
     n = len(next(iter(samples.values())))
     print(f"  n = {n:,} per sample")
     print()
-    print("  %-34s%12s%12s%12s" % ("", *samples.keys()))
+    print(("  %-34s" + "%12s" * len(samples)) % ("", *samples.keys()))
 
     stat_rows = []
     for name, f, se, target in [
@@ -107,7 +107,7 @@ def gof_blocked(samples):
             ad_med=float(np.median(ad_stat)), ad_max=float(ad_stat.max()),
             ad_rej=int((ad_stat > 3.878).sum()),   # 1% point for fully specified A^2
         )
-    print("  %-34s%12s%12s%12s" % ("", *samples.keys()))
+    print(("  %-34s" + "%12s" * len(samples)) % ("", *samples.keys()))
     row("blocks tested",            [out[k]["nb"] for k in samples], "%12d")
     row(f"KS  blocks rejected @{ALPHA}",  [out[k]["ks_rej"] for k in samples], "%12d")
     row("KS  p-value uniformity p",  [out[k]["ks_unif"] for k in samples], "%12.3e")
@@ -127,7 +127,7 @@ def tails(samples):
     """
     banner("3. TAILS  (observed vs expected exceedances, z from the binomial)")
     n = len(next(iter(samples.values())))
-    print("  %-34s%12s%12s%12s" % ("threshold", *samples.keys()))
+    print(("  %-34s" + "%12s" * len(samples)) % ("threshold", *samples.keys()))
     for t in [1, 2, 3, 4, 5, 5.5, 6]:
         p = 2 * stats.norm.sf(t)
         exp = n * p
@@ -153,7 +153,7 @@ def independence(samples):
     the marginals stayed perfect.
     """
     banner("4. INDEPENDENCE")
-    print("  %-34s%12s%12s%12s" % ("", *samples.keys()))
+    print(("  %-34s" + "%12s" * len(samples)) % ("", *samples.keys()))
     for lag in [1, 2, 3, 7, 16, 64]:
         vals = []
         for x in samples.values():
@@ -186,7 +186,7 @@ def chisq(samples):
     edges = stats.norm.ppf(np.linspace(0, 1, 257))
     edges[0], edges[-1] = -np.inf, np.inf
     exp = n / 256
-    print("  %-34s%12s%12s%12s" % ("", *samples.keys()))
+    print(("  %-34s" + "%12s" * len(samples)) % ("", *samples.keys()))
     stat, pv = [], []
     for x in samples.values():
         obs, _ = np.histogram(x, bins=edges)
@@ -199,11 +199,11 @@ def chisq(samples):
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else "."
-    samples = {
-        "VEC": load(f"{base}/VBM_VEC.bin"),
-        "SCALAR": load(f"{base}/VBM_SCALAR.bin"),
-        "BROKEN": load(f"{base}/VBM_BROKEN.bin"),
-    }
+    import os
+    want = [("VEC", "VBM_VEC.bin"), ("SCALAR", "VBM_SCALAR.bin"),
+            ("ZIG", "VBM_ZIG.bin"), ("BROKEN", "VBM_BROKEN.bin")]
+    samples = {k: load(f"{base}/{f}") for k, f in want
+               if os.path.exists(f"{base}/{f}")}
     for k, v in samples.items():
         assert v.size > 0, k
     print("Normal-generator goodness-of-fit battery")

@@ -16,7 +16,11 @@ unbounded tails, where Box-Muller from a 53-bit uniform truncates near 8.5 sigma
 
 Costs:
 
-- Resolution drops from 53 bits to 32 per draw. This is an f64 library.
+- Resolution: CORRECTED. This originally said "drops from 53 bits to 32", which
+  overstated it. The value is hz*wn[iz] and the per-strip scale differs across
+  128 strips, so the reachable value set is nearer 2^39 than 2^32. Counting
+  exact ties in 5,000,000 samples gives ZERO for ziggurat, Box-Muller and
+  vectorised Box-Muller alike. Real in principle, undetectable at that n.
 - 2560 bytes of tables that need exp/log to build, so not compile-time
   constants. src/synth currently has zero global state; the consistent home is
   the caller's synth_scratch block, +2560 bytes.

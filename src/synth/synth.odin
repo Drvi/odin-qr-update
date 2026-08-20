@@ -468,3 +468,209 @@ synth_terms_poly :: proc "contextless" (out: []u8, k: int, degree: int) -> Synth
 	}
 	return .None
 }
+
+// ============================================================================
+// Multivariate normal sampling on its own
+// ============================================================================
+//
+// synth_rows draws correlated base variables and then expands them into model
+// terms. Mvn exposes just the first half: N(0, Sigma) rows with Sigma =
+// D*corr*D, and nothing else. Useful when correlated Gaussian inputs are the
+// product rather than an ingredient.
+//
+// It differs from the path inside synth_rows in two ways that are worth having:
+//
+//   1. It fills a BLOCK of rows' standard normals first, then applies the
+//      Cholesky factor across the whole block. That turns a per-row triangular
+//      matrix-vector product into a blocked one, so L is streamed once per
+//      block instead of once per row. Whether that wins depends on k against
+//      the cache -- measured in docs/SYNTH.md.
+//   2. It recognises a diagonal Sigma at init and drops to O(k) per row, since
+//      an identity correlation needs no matrix product at all. That is the
+//      default case for anyone who has not asked for correlation.
+//
+// Draw indices match synth_rows exactly (base draw j of row r is global index
+// r*k + j on STREAM_BASE), so the same seed gives the same base variables
+// either way. test_synth_mvn_matches_synth_rows pins that down.
+
+Mvn :: struct {
+	k:     int, // dimension
+	block: int, // rows transformed per pass
+	diag:  bool, // Sigma is diagonal: sampling is O(k), chol holds k scales
+	chol:  []f64, // k*k lower triangular, or k scale factors when diag
+	z:     []f64, // block*k standard normals
+}
+
+// Scratch required by synth_mvn_init, in f64 elements.
+//
+// `block` trades scratch for transform efficiency. 64 is a reasonable default;
+// 1 reproduces the per-row behaviour of synth_rows.
+synth_mvn_scratch :: proc "contextless" (k: int, block: int) -> int {
+	return k * k + block * k
+}
+
+// synth_mvn_init validates Sigma and factors it once.
+//
+//   corr     in  k*k correlation matrix, same rules as synth_init: symmetric to
+//                CORR_TOL, unit diagonal, entries in [-1,1], positive definite.
+//   variance in  k strictly positive variances.
+//   block    in  rows per transform pass, >= 1.
+//   scratch  in  f64[>= synth_mvn_scratch(k, block)], caller-owned.
+synth_mvn_init :: proc "contextless" (
+	m: ^Mvn,
+	k: int,
+	corr: []f64,
+	variance: []f64,
+	block: int,
+	scratch: []f64,
+) -> Synth_Error {
+	if k < 1 || block < 1 {
+		return .Invalid_Dimension
+	}
+	if len(corr) < k * k || len(variance) < k {
+		return .Invalid_Dimension
+	}
+	if len(scratch) < synth_mvn_scratch(k, block) {
+		return .Scratch_Too_Small
+	}
+	for j in 0 ..< k {
+		if !(variance[j] > 0.0) {
+			return .Invalid_Variance
+		}
+	}
+	// Same correlation checks as synth_init, and the same reason: a matrix can
+	// be legal entry by entry and still describe no distribution.
+	is_diag := true
+	for i in 0 ..< k {
+		if abs(corr[i * k + i] - 1.0) > CORR_TOL {
+			return .Invalid_Correlation
+		}
+		for j in 0 ..< k {
+			c := corr[i * k + j]
+			if !(c >= -1.0 && c <= 1.0) {
+				return .Invalid_Correlation
+			}
+			if abs(c - corr[j * k + i]) > CORR_TOL {
+				return .Invalid_Correlation
+			}
+			if i != j && c != 0.0 {
+				is_diag = false
+			}
+		}
+	}
+
+	m.k = k
+	m.block = block
+	m.chol = scratch[0:k * k]
+	m.z = scratch[k * k:k * k + block * k]
+	m.diag = is_diag
+
+	if is_diag {
+		// Nothing to factor: the transform is a per-component scale.
+		for j in 0 ..< k {
+			m.chol[j] = math.sqrt_f64(variance[j])
+		}
+		return .None
+	}
+
+	for i in 0 ..< k {
+		si := math.sqrt_f64(variance[i])
+		for j in 0 ..< k {
+			m.chol[i * k + j] = si * corr[i * k + j] * math.sqrt_f64(variance[j])
+		}
+	}
+	if info := blas.dpotrf(.Lower, k, m.chol, k); info != 0 {
+		return .Not_Positive_Definite
+	}
+	return .None
+}
+
+// synth_mvn_rows generates `count` rows of N(0, Sigma).
+//
+//   seed      in   any u32; with first_row it fully determines the output.
+//   first_row in   absolute row index, >= 0. Rows are independent of each
+//                  other, so batches may be generated in any order.
+//   out       out  f64[>= (count-1)*ldout + k], row-major, ldout >= k.
+//   count     in   rows, >= 0.
+//
+// Cost per row: k normal draws, plus k^2/2 multiply-adds for a general Sigma or
+// k multiplies for a diagonal one. Memory is the caller's scratch and does not
+// grow with count.
+synth_mvn_rows :: proc "contextless" (
+	m: ^Mvn,
+	seed: u32,
+	first_row: int,
+	out: []f64,
+	ldout: int,
+	count: int,
+) -> Synth_Error {
+	k := m.k
+	if k < 1 || m.block < 1 {
+		return .Invalid_Dimension
+	}
+	if count < 0 || first_row < 0 || ldout < k {
+		return .Invalid_Dimension
+	}
+	if count == 0 {
+		return .None
+	}
+	if len(out) < (count - 1) * ldout + k {
+		return .Invalid_Dimension
+	}
+	if u64(first_row + count) * u64(k) > 0xFFFFFFFF {
+		// Global draw indices would wrap and rows would alias. See synth_rows.
+		return .Invalid_Dimension
+	}
+
+	done := 0
+	for done < count {
+		rows := min(m.block, count - done)
+
+		// --- fill the block with standard normals ---
+		// Globally indexed exactly as synth_rows does, so both agree.
+		NO_PAIR :: ~u64(0)
+		pi_cached := NO_PAIR
+		pa, pb := 0.0, 0.0
+		for i in 0 ..< rows {
+			abs_row := u64(first_row + done + i)
+			for j in 0 ..< k {
+				gi := abs_row * u64(k) + u64(j)
+				pi := gi >> 1
+				if pi != pi_cached {
+					pa, pb = synth_normal_pair(seed, STREAM_BASE, u32(pi))
+					pi_cached = pi
+				}
+				m.z[i * k + j] = gi & 1 == 0 ? pa : pb
+			}
+		}
+
+		// --- transform the block ---
+		if m.diag {
+			// Sigma diagonal: no matrix product exists to do.
+			for i in 0 ..< rows {
+				dst := (done + i) * ldout
+				for j in 0 ..< k {
+					out[dst + j] = m.chol[j] * m.z[i * k + j]
+				}
+			}
+		} else {
+			// out = Z * L^T. Accumulating along b innermost keeps the summation
+			// order identical to a per-row triangular product, so blocking
+			// changes speed and not results.
+			for i in 0 ..< rows {
+				dst := (done + i) * ldout
+				zi := i * k
+				for a in 0 ..< k {
+					s := 0.0
+					row_a := a * k
+					for b in 0 ..= a {
+						s += m.chol[row_a + b] * m.z[zi + b]
+					}
+					out[dst + a] = s
+				}
+			}
+		}
+		done += rows
+	}
+	return .None
+}
