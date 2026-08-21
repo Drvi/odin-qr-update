@@ -27,6 +27,7 @@ import "core:math"
 import "core:mem"
 import "core:time"
 import blas "../../src/blas"
+import synth "../../src/synth"
 
 N :: 4 // predictors, including the intercept
 M :: 50_000 // observations held in memory for regime 1
@@ -46,30 +47,32 @@ BETA_TRUE := [N]f64{1.5, -0.8, 2.25, 0.4}
 data_x: [M * N]f64
 data_y: [M]f64
 
-RNG :: struct {
-	state: u64,
-}
-ru :: proc(r: ^RNG) -> f64 {
-	r.state = r.state * 6364136223846793005 + 1442695040888963407
-	return f64((r.state >> 11) & 0x1FFFFFFFFFFFFF) / f64(0x1FFFFFFFFFFFFF)
-}
-rnorm :: proc(r: ^RNG) -> f64 {
-	u1 := ru(r)
-	for u1 < 1e-12 {u1 = ru(r)}
-	return math.sqrt_f64(-2.0 * math.ln_f64(u1)) * math.cos_f64(2.0 * math.PI * ru(r))
-}
+// The data comes from src/synth rather than a hand-rolled Box-Muller. That
+// generator is the one the test suite puts through a goodness-of-fit battery,
+// so an example is not quietly demonstrating against numbers of unknown
+// quality -- and it is allocation-free and contextless, so it fits here.
+K :: N - 1 // base variables; column 0 of the design is the intercept
+SEED :: u32(2024)
+NOISE :: 0.25
 
-// One observation: intercept, then N-1 predictors, and the response.
-make_sample :: proc(r: ^RNG, row: []f64) -> f64 {
-	row[0] = 1.0
-	for j in 1 ..< N {
-		row[j] = rnorm(r)
+// Intercept plus one linear term per base variable: exactly the model this
+// example fits.
+TERMS := [N * K]u8{
+	0, 0, 0, // intercept
+	1, 0, 0, // b0
+	0, 1, 0, // b1
+	0, 0, 1, // b2
+}
+CORR := [K * K]f64{1, 0, 0, 0, 1, 0, 0, 0, 1}
+VARIANCE := [K]f64{1, 1, 1}
+
+make_spec :: proc(spec: ^synth.Spec, scratch: []f64) -> bool {
+	e := synth.synth_init(spec, K, CORR[:], VARIANCE[:], TERMS[:], BETA_TRUE[:], NOISE, scratch)
+	if e != .None {
+		fmt.printf("synth_init failed: %v\n", e)
+		return false
 	}
-	y := 0.0
-	for j in 0 ..< N {
-		y += row[j] * BETA_TRUE[j]
-	}
-	return y + 0.25 * rnorm(r)
+	return true
 }
 
 report :: proc(rows: int, acc: ^blas.Ols_Accum) {
@@ -118,9 +121,12 @@ absorb_within :: proc(acc: ^blas.Ols_Accum, m: int, budget_ms: f64) -> blas.Ols_
 chunked_across_frames :: proc() {
 	fmt.println("--- Regime 1: 50,000 resident rows, chunked across frames ---")
 
-	rng := RNG{2024}
-	for i in 0 ..< M {
-		data_y[i] = make_sample(&rng, data_x[i * N:][:N])
+	sscratch: [K * K + 2 * K]f64
+	spec: synth.Spec
+	if !make_spec(&spec, sscratch[:]) {return}
+	if e := synth.synth_rows(&spec, SEED, 0, data_x[:], N, data_y[:], M); e != .None {
+		fmt.printf("  generate failed: %v\n", e)
+		return
 	}
 
 	scratch: [(N + 1) * (N + 1) + (N + 1)]f64
@@ -162,7 +168,9 @@ chunked_across_frames :: proc() {
 streaming :: proc() {
 	fmt.println("--- Regime 2: streaming, one row at a time, nothing retained ---")
 
-	rng := RNG{7}
+	sscratch: [K * K + 2 * K]f64
+	spec: synth.Spec
+	if !make_spec(&spec, sscratch[:]) {return}
 	scratch: [(N + 1) * (N + 1) + (N + 1)]f64
 	acc: blas.Ols_Accum
 	blas.ols_accum_init(&acc, N, scratch[:])
@@ -178,7 +186,12 @@ streaming :: proc() {
 	next := 0
 
 	for i in 1 ..= 20_000 {
-		yv[0] = make_sample(&rng, row[:])
+		// One row at a time, generated on demand: first_row is absolute, so the
+		// stream needs no state carried between iterations.
+		if e := synth.synth_rows(&spec, SEED + 1, i - 1, row[:], N, yv[:], 1); e != .None {
+			fmt.printf("  generate failed: %v\n", e)
+			return
+		}
 
 		// One sample in, folded straight into the triangle. `row` and `yv` are
 		// reused on the next iteration; the accumulator kept what it needed.
@@ -198,7 +211,9 @@ streaming :: proc() {
 bad_data :: proc() {
 	fmt.println("--- Bad samples are rejected, not absorbed ---")
 
-	rng := RNG{99}
+	sscratch: [K * K + 2 * K]f64
+	spec: synth.Spec
+	if !make_spec(&spec, sscratch[:]) {return}
 	scratch: [(N + 1) * (N + 1) + (N + 1)]f64
 	acc: blas.Ols_Accum
 	blas.ols_accum_init(&acc, N, scratch[:])
@@ -207,7 +222,10 @@ bad_data :: proc() {
 	yv: [1]f64
 	rejected := 0
 	for i in 0 ..< 500 {
-		yv[0] = make_sample(&rng, row[:])
+		if e := synth.synth_rows(&spec, SEED + 2, i, row[:], N, yv[:], 1); e != .None {
+			fmt.printf("  generate failed: %v\n", e)
+			return
+		}
 
 		// Simulate a sensor glitch.
 		if i % 97 == 0 {

@@ -311,10 +311,80 @@ row indices, so the exclusion list is reused unchanged across chunks and the
 cursor is re-established per call by binary search. Verified bit-identical
 across chunk sizes 1, 3, 7 and all-at-once.
 
+## Measurement: the QR-update route to a sub-model
+
+The repository already had `delcols` — Givens-based column deletion from an `R`
+factor — and the model-iteration work did not use it. That was worth checking.
+
+**It works on the augmented triangle, and that is the point.** `delcols` is
+documented against the `R` factor of `X`, which on its own cannot answer a
+least-squares question: you would still need `Q^T*y`, and getting it means
+either keeping `Q` (the `m x m` object this subsystem exists to avoid) or a pass
+over the data. Applied to the **augmented** triangle — the `R` factor of
+`[X | y]` — the response is simply another column, so deleting a predictor
+leaves `y` last in the reduced augmented matrix and `Q^T*y` comes along for
+free. No `Q`, no data.
+
+Measured at `p = 30` predictors, `m = 50 000` rows, **all pairwise correlations
+0.95** so the conditioning actually bites. Both routes compared against a
+from-scratch fit of the same subset:
+
+| | worst relative error |
+|---|---|
+| `ols_accum_select` (rebuild) | 5.859e-13 |
+| `delcols` on the augmented triangle | **5.859e-13** |
+
+Identical to every displayed digit, across all 30 single-column drops.
+
+**Error does not accumulate under chaining**, which was the plausible objection.
+Dropping the *first* predictor repeatedly — the maximally-rotating case, since
+every remaining column shifts and a bulge is chased across all of them — for 28
+consecutive deletions:
+
+| k | select (fresh each time) | chained `delcols` |
+|---|---|---|
+| 29 | 5.859e-13 | 5.859e-13 |
+| 22 | 7.518e-14 | 7.531e-14 |
+| 15 | 8.131e-14 | 8.212e-14 |
+| 8 | 1.652e-13 | 1.658e-13 |
+| 2 | 3.193e-14 | 3.134e-14 |
+
+The chained route tracks the from-fresh route within a few percent at every
+step, and the error *falls* as `k` shrinks because the sub-model is better
+conditioned. Givens updating is backward stable and 28 chained updates cost
+nothing. (An earlier version of this test dropped the *last* column, which
+rotates nothing and showed exactly zero error for both — it proved nothing and
+was replaced.)
+
+**Speed is where they differ**, and by a lot:
+
+| p | `ols_accum_select` | copy + `delcols` | |
+|---|---|---|---|
+| 12 | 1.151 us | 0.070 us | 16x |
+| 30 | 5.694 us | 0.155 us | **37x** |
+
+That is the cost classes talking: `O(p*k^2)` to rebuild the sub-model against
+`O(d*p^2)` to rotate `d` columns out. Dropping *few* predictors favours
+rotation; dropping *most* favours rebuilding, since `select` constructs the
+small triangle directly. The crossover is near `d*p = k^2`.
+
+Both are now available. `ols_accum_drop_cols` is the rotation route, verified
+against the same numpy ground truth as `select` on all 31 subsets of the real
+data (worst coefficient error 2.0e-15), plus drop-order independence and the
+boundary policy. `select` was not changed to dispatch between them: the two
+differ in the last bits, and silently picking an algorithm by a size heuristic
+would make results depend on a threshold rather than on the request.
+
+**This was a real gap.** The reasoning that skipped `delcols` came from the
+old example, which used `delcolsq` — the variant that updates the `m x m` `Q` —
+and then spent `O(m^2)` forming `Q^T*y`. Generalising from that to "the QR
+update routines need `Q`" was wrong: on the augmented triangle they need
+nothing but the triangle.
+
 ## Correctness verification
 
 Ground truth is `numpy.linalg.lstsq` (LAPACK) on the repository's own real
-data, `examples/X_initial.csv` + `y_initial.csv` (`20 x 5`, `cond = 2.3265`).
+data, `examples/X_initial.csv` + `y_initial.csv` (`20 x 5`, `cond = 2.0815`).
 
 | Criterion | Result |
 |---|---|

@@ -488,6 +488,113 @@ ols_accum_select :: proc "contextless" (dst: ^Ols_Accum, src: ^Ols_Accum, keep: 
 	return .None
 }
 
+// Scratch required by ols_accum_drop_cols, in f64 elements, for a source
+// accumulator with `n` predictors.
+ols_accum_drop_scratch :: proc "contextless" (n: int) -> int {
+	return (n + 1) * (n + 1) + n
+}
+
+// ols_accum_drop_cols removes predictors from a fit by rotating them out of the
+// triangle, rather than rebuilding the sub-model from scratch.
+//
+// Same answer as ols_accum_select for the same kept set, reached a different
+// way, and the two are in different cost classes:
+//
+//     ols_accum_select     O(p*k^2)   builds the k-predictor triangle directly
+//     ols_accum_drop_cols  O(d*p^2)   rotates d columns out of the p-triangle
+//
+// so dropping FEW predictors is much cheaper here, and dropping MOST is cheaper
+// with select. The crossover is near d*p = k^2. Measured at p = 30 dropping one
+// column: 0.155 us against 5.694 us, a factor of 37 (docs/OLS_RESULTS.md).
+//
+// Accuracy is not a reason to prefer either. Both are backward stable, and at
+// p = 30 with all pairwise correlations 0.95 they match a from-scratch fit to
+// the same digit, with no error growth over 28 chained deletions.
+//
+// BATCH CONTRACT
+//   dst     out  accumulator with dst.n == src.n - len(drop). Reset and
+//                overwritten. Must not alias src.
+//   src     in   the fit to remove predictors from. NOT modified.
+//   drop    in   src-predictor indices to remove, each in [0, src.n), no
+//                duplicates. Order does not matter. Not modified.
+//   scratch temp f64[>= ols_accum_drop_scratch(src.n)]. Undefined on exit.
+//
+// dst.nrows is set to src.nrows: the same observations, fewer predictors.
+//
+// The response rides along automatically. The triangle is the R factor of
+// [X | y], so removing a predictor column leaves y as the last column of the
+// reduced augmented matrix -- which is why this needs neither Q nor the data.
+ols_accum_drop_cols :: proc "contextless" (
+	dst: ^Ols_Accum,
+	src: ^Ols_Accum,
+	drop: []int,
+	scratch: []f64,
+) -> Ols_Error {
+	p := src.n
+	d := len(drop)
+	if p < 1 || dst.n < 1 || dst.n != p - d {
+		return .Invalid_Dimension
+	}
+	if raw_data(dst.tri) == raw_data(src.tri) {
+		return .Invalid_Dimension
+	}
+	if len(scratch) < ols_accum_drop_scratch(p) {
+		return .Scratch_Too_Small
+	}
+	for a in 0 ..< d {
+		if drop[a] < 0 || drop[a] >= p {
+			return .Invalid_Dimension
+		}
+		for b in a + 1 ..< d {
+			if drop[a] == drop[b] {
+				return .Invalid_Dimension
+			}
+		}
+	}
+
+	ld := src.ld // p+1
+	t := scratch[0:ld * ld]
+	for i in 0 ..< ld * ld {
+		t[i] = src.tri[i]
+	}
+
+	// A private, sortable copy of the drop list: the caller's slice is an input
+	// and must not be reordered.
+	idx := scratch[ld * ld:ld * ld + max(d, 1)]
+	for i in 0 ..< d {
+		idx[i] = f64(drop[i])
+	}
+	// Insertion sort descending; d is tiny.
+	for i in 1 ..< d {
+		v := idx[i]
+		j := i - 1
+		for j >= 0 && idx[j] < v {
+			idx[j + 1] = idx[j]
+			j -= 1
+		}
+		idx[j + 1] = v
+	}
+
+	// Delete highest first, so the lower indices stay valid as columns shift.
+	live := p + 1 // live columns in t, response included
+	for i in 0 ..< d {
+		col := int(idx[i])
+		delcols(ld, live, col, 1, t, ld, t[:0])
+		live -= 1
+	}
+
+	// Repack from the source stride into dst's own (k+1) stride.
+	k := dst.n
+	ols_accum_reset(dst)
+	for r in 0 ..< k + 1 {
+		for c in 0 ..< k + 1 {
+			dst.tri[r * dst.ld + c] = t[r * ld + c]
+		}
+	}
+	dst.nrows = src.nrows
+	return .None
+}
+
 // ols_accum_merge folds src into dst, giving the fit over both row sets.
 //
 //   dst  in/out  accumulator; must have the same n as src. Must not alias src.

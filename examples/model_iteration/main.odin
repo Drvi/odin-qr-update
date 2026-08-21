@@ -23,6 +23,7 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 import blas "../../src/blas"
+import synth "../../src/synth"
 
 P :: 8 // candidate predictors, decided up front, accumulated once
 M0 :: 4000 // first batch of observations
@@ -40,28 +41,33 @@ y0: [M0]f64
 x1: [M1 * P]f64
 y1: [M1]f64
 
-RNG :: struct {
-	state: u64,
-}
-ru :: proc(r: ^RNG) -> f64 {
-	r.state = r.state * 6364136223846793005 + 1442695040888963407
-	return f64((r.state >> 11) & 0x1FFFFFFFFFFFFF) / f64(0x1FFFFFFFFFFFFF)
-}
-rnorm :: proc(r: ^RNG) -> f64 {
-	u1 := ru(r)
-	for u1 < 1e-12 {u1 = ru(r)}
-	return math.sqrt_f64(-2.0 * math.ln_f64(u1)) * math.cos_f64(2.0 * math.PI * ru(r))
-}
+// Data comes from src/synth rather than a hand-rolled Box-Muller: that
+// generator is the one the suite puts through a goodness-of-fit battery, and it
+// is allocation-free, so it works under the panic allocator installed below.
+K :: P - 1 // base variables; design column 0 is the intercept
+SEED :: u32(31337)
 
-fill :: proc(r: ^RNG, x: []f64, y: []f64, m: int) {
-	for i in 0 ..< m {
-		x[i * P] = 1.0
-		for j in 1 ..< P {x[i * P + j] = rnorm(r)}
-		s := 0.0
-		for j in 0 ..< P {s += x[i * P + j] * TRUE_COEF[j]}
-		y[i] = s + NOISE * rnorm(r)
-	}
+// Intercept plus one linear term per base variable.
+TERMS := [P * K]u8 {
+	0, 0, 0, 0, 0, 0, 0, // intercept
+	1, 0, 0, 0, 0, 0, 0, // b0 -> predictor 1
+	0, 1, 0, 0, 0, 0, 0,
+	0, 0, 1, 0, 0, 0, 0,
+	0, 0, 0, 1, 0, 0, 0,
+	0, 0, 0, 0, 1, 0, 0,
+	0, 0, 0, 0, 0, 1, 0,
+	0, 0, 0, 0, 0, 0, 1,
 }
+CORR := [K * K]f64 {
+	1, 0, 0, 0, 0, 0, 0,
+	0, 1, 0, 0, 0, 0, 0,
+	0, 0, 1, 0, 0, 0, 0,
+	0, 0, 0, 1, 0, 0, 0,
+	0, 0, 0, 0, 1, 0, 0,
+	0, 0, 0, 0, 0, 1, 0,
+	0, 0, 0, 0, 0, 0, 1,
+}
+VARIANCE := [K]f64{1, 1, 1, 1, 1, 1, 1}
 
 // A hypothesis the user wants to test: a name and the predictors it uses.
 Hypothesis :: struct {
@@ -108,9 +114,24 @@ main :: proc() {
 	context.allocator = mem.panic_allocator()
 	context.temp_allocator = mem.panic_allocator()
 
-	rng := RNG{31337}
-	fill(&rng, x0[:], y0[:], M0)
-	fill(&rng, x1[:], y1[:], M1)
+	sscratch: [K * K + 2 * K]f64
+	spec: synth.Spec
+	if e := synth.synth_init(
+		&spec, K, CORR[:], VARIANCE[:], TERMS[:], TRUE_COEF[:], NOISE, sscratch[:],
+	); e != .None {
+		fmt.printf("synth_init failed: %v\n", e)
+		return
+	}
+	// The two batches are consecutive row ranges of one stream, so they are
+	// distinct data without needing distinct seeds.
+	if e := synth.synth_rows(&spec, SEED, 0, x0[:], P, y0[:], M0); e != .None {
+		fmt.printf("generate failed: %v\n", e)
+		return
+	}
+	if e := synth.synth_rows(&spec, SEED, M0, x1[:], P, y1[:], M1); e != .None {
+		fmt.printf("generate failed: %v\n", e)
+		return
+	}
 
 	// Scratch, sized by the library's own size procedures. Fixed arrays, so
 	// the caller can see and budget every byte.

@@ -28,12 +28,13 @@ in the repository:
 
 - Shape `20 x 5`, dense, row-major, `f64`.
 - Column 0 is exactly `1.0` in all 20 rows (intercept).
-- Remaining entries approximately `N(0,1)`; observed range `[-4.0008, 2.0792]`.
-- `cond(X) = 2.3265` — well conditioned.
-- Ground truth (numpy `lstsq`): `beta = [2.04043827528268, -1.48909548321255,
-  0.535156175896668, -0.279793128956933, 1.437575944628262]`,
-  `RSS = 3.016933013710126`. The repository's current output matches this to
-  `7.8e-16`.
+- Remaining entries approximately `N(0,1)`; observed range `[-2.9922, 2.4175]`.
+- `cond(X) = 2.0815` — well conditioned.
+- Ground truth (numpy `lstsq`): `beta = [1.897167064519, -1.345057100232, 0.651590911963, -0.268730046077, 1.225556651613]`,
+  `RSS = 3.879784840645564e+00`. The repository's current output matches this to `1.6e-15`.
+- Regenerated after the examples were switched to `src/synth`'s validated
+  generator; the earlier figures came from a hand-rolled LCG plus Box-Muller in
+  the example itself.
 
 **Five data questions.**
 

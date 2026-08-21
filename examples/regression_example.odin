@@ -1,36 +1,23 @@
 package regression_example
 
 import "core:fmt"
-import "core:math"
 import "core:os"
 import "core:strings"
 import "../src/blas"
+import synth "../src/synth"
 
-// Simple LCG random number generator for reproducibility
-RNG :: struct {
-    state: u64,
-}
+// Random numbers come from src/synth, which is the generator the test suite
+// validates against a goodness-of-fit battery. Draws are indexed rather than
+// streamed, so each use below names its own stream and cannot disturb another.
+SEED :: u32(42)
+STREAM_X :: u32(10) // design matrix entries
+STREAM_NOISE :: u32(11) // response noise
+STREAM_NEWCOL :: u32(12) // the added column
+STREAM_NEWROW :: u32(13) // the added rows
+STREAM_NEWY :: u32(14) // responses for the added rows
 
-rng_init :: proc(seed: u64) -> RNG {
-    return RNG{state = seed}
-}
-
-rng_next :: proc(r: ^RNG) -> f64 {
-    // LCG parameters (same as glibc)
-    r.state = r.state * 1103515245 + 12345
-    // Convert to [0, 1)
-    return f64((r.state >> 16) & 0x7FFFFFFF) / f64(0x7FFFFFFF)
-}
-
-rng_normal :: proc(r: ^RNG) -> f64 {
-    // Box-Muller transform
-    u1 := rng_next(r)
-    u2 := rng_next(r)
-    // Avoid log(0)
-    for u1 < 1e-10 {
-        u1 = rng_next(r)
-    }
-    return math.sqrt_f64(-2.0 * math.ln_f64(u1)) * math.cos_f64(2.0 * math.PI * u2)
+rnorm :: proc(stream: u32, index: int) -> f64 {
+    return synth.synth_normal(SEED, stream, u32(index))
 }
 
 // Solve least squares problem using QR factorization: min ||Ax - b||
@@ -126,10 +113,6 @@ main :: proc() {
     // Problem dimensions
     M :: 20      // Number of observations
     N :: 5       // Number of predictors (including intercept)
-    SEED :: 42   // Random seed for reproducibility
-
-    // Initialize RNG
-    rng := rng_init(SEED)
 
     // Generate random design matrix X (M x N)
     // First column is all 1s (intercept)
@@ -140,7 +123,7 @@ main :: proc() {
     for i in 0 ..< M {
         x_full[i * lda + 0] = 1.0  // Intercept
         for j in 1 ..< N {
-            x_full[i * lda + j] = rng_normal(&rng)
+            x_full[i * lda + j] = rnorm(STREAM_X, i * N + j)
         }
     }
 
@@ -156,7 +139,7 @@ main :: proc() {
         for j in 0 ..< N {
             y_full[i] += x_full[i * lda + j] * beta_true[j]
         }
-        y_full[i] += 0.5 * rng_normal(&rng)  // Add noise
+        y_full[i] += 0.5 * rnorm(STREAM_NOISE, i)  // Add noise
     }
 
     // Work arrays. Sized once here for the largest case any call below uses,
@@ -312,7 +295,7 @@ main :: proc() {
     new_col := make([]f64, M)
     defer delete(new_col)
     for i in 0 ..< M {
-        new_col[i] = rng_normal(&rng)
+        new_col[i] = rnorm(STREAM_NEWCOL, i)
     }
 
     // Add column at position 3 using QR update
@@ -404,14 +387,14 @@ main :: proc() {
     for i in 0 ..< NUM_NEW_ROWS {
         new_rows[i * N + 0] = 1.0  // Intercept
         for j in 1 ..< N {
-            new_rows[i * N + j] = rng_normal(&rng)
+            new_rows[i * N + j] = rnorm(STREAM_NEWROW, i * N + j)
         }
         // Generate corresponding y value
         new_y[i] = 0.0
         for j in 0 ..< N {
             new_y[i] += new_rows[i * N + j] * beta_true[j]
         }
-        new_y[i] += 0.5 * rng_normal(&rng)
+        new_y[i] += 0.5 * rnorm(STREAM_NEWY, i)
     }
 
     // Add rows using QR update
