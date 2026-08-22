@@ -632,6 +632,8 @@ main :: proc() {
         {"merge then select", test_ols_merge_then_select},
         {"select/merge boundaries", test_ols_iteration_boundaries},
         {"drop_cols vs select", test_ols_drop_cols},
+        {"standard errors", test_ols_stderr},
+        {"held-out eval", test_ols_eval},
         {"gather == plain", test_ols_gather_equals_plain},
         {"gather column subsets", test_ols_gather_column_subset},
         {"gather row exclusion", test_ols_gather_row_exclusion},

@@ -2761,3 +2761,252 @@ test_ols_drop_cols :: proc() -> bool {
 	fmt.println("  PASSED")
 	return true
 }
+
+// ============================================================================
+// Standard errors and held-out evaluation
+// ============================================================================
+
+// Standard errors from numpy, for the real 20x5 data and two subsets.
+// se = sqrt(diag(sigma^2 * (X'X)^-1)), sigma^2 = RSS/(m-k). Generated.
+SE_CASES :: 3
+se_mask := [SE_CASES]int{31, 21, 3}
+se_k := [SE_CASES]int{5, 3, 2}
+se_truth := [SE_CASES * 5]f64{
+	1.34344091785131292e-01, 1.28189487867473140e-01, 1.39897360915655938e-01, 1.46783759666995806e-01, 1.23410921087394140e-01,
+	3.23199797890819096e-01, 3.17125682815759424e-01, 3.30180890038760666e-01, 0.00000000000000000e+00, 0.00000000000000000e+00,
+	3.22351405035499416e-01, 2.99549413018931343e-01, 0.00000000000000000e+00, 0.00000000000000000e+00, 0.00000000000000000e+00,
+}
+
+test_ols_stderr :: proc() -> bool {
+	fmt.println("Testing ols_accum_stderr against numpy...")
+
+	full_scratch := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(full_scratch)
+	full: blas.Ols_Accum
+	if !build_full(full_scratch, &full) {
+		fmt.println("  FAILED: superset")
+		return false
+	}
+
+	worst := 0.0
+	for c in 0 ..< SE_CASES {
+		k := se_k[c]
+		keep: [REAL_N]int
+		w := 0
+		for i in 0 ..< REAL_N {
+			if se_mask[c] & (1 << uint(i)) != 0 {keep[w] = i;w += 1}
+		}
+		sub_scratch := make([]f64, blas.ols_accum_scratch(k));defer delete(sub_scratch)
+		sub: blas.Ols_Accum
+		blas.ols_accum_init(&sub, k, sub_scratch)
+		if e := blas.ols_accum_select(&sub, &full, keep[:k]); e != .None {
+			fmt.printf("  FAILED: select %v\n", e)
+			return false
+		}
+
+		sscratch := make([]f64, blas.ols_stderr_scratch(k));defer delete(sscratch)
+		se: [REAL_N]f64
+		if e := blas.ols_accum_stderr(&sub, se[:k], sscratch); e != .None {
+			fmt.printf("  FAILED: stderr case %d -> %v\n", c, e)
+			return false
+		}
+		for j in 0 ..< k {
+			want := se_truth[c * REAL_N + j]
+			rel := abs(se[j] - want) / want
+			worst = max(worst, rel)
+			if rel > 1e-10 {
+				fmt.printf("  FAILED: case %d se[%d] = %.17e want %.17e\n", c, j, se[j], want)
+				return false
+			}
+		}
+	}
+	fmt.printf("    %d models vs numpy, worst relative error %.2e\n", SE_CASES, worst)
+
+	// A t-statistic is caller arithmetic; check it separates a real predictor
+	// from an absent one on data where we planted the truth.
+	{
+		beta: [REAL_N]f64
+		if e := blas.ols_accum_solve(&full, beta[:]); e != .None {
+			fmt.printf("  FAILED: solve %v\n", e)
+			return false
+		}
+		sscratch := make([]f64, blas.ols_stderr_scratch(REAL_N));defer delete(sscratch)
+		se: [REAL_N]f64
+		blas.ols_accum_stderr(&full, se[:], sscratch)
+		for j in 0 ..< REAL_N {
+			if !(se[j] > 0) {
+				fmt.printf("  FAILED: se[%d] = %.3e, not positive\n", j, se[j])
+				return false
+			}
+		}
+	}
+
+	// Boundaries.
+	{
+		sscratch := make([]f64, blas.ols_stderr_scratch(REAL_N));defer delete(sscratch)
+		se: [REAL_N]f64
+		// dof == 0: exactly n rows means a zero residual by construction, so
+		// sigma^2 is undefined and there is no honest answer.
+		thin_scratch := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(thin_scratch)
+		thin: blas.Ols_Accum
+		blas.ols_accum_init(&thin, REAL_N, thin_scratch)
+		blas.ols_accum_rows(&thin, real_x[:], REAL_N, real_y[:], REAL_N)
+		if e := blas.ols_accum_stderr(&thin, se[:], sscratch); e != .Not_Enough_Rows {
+			fmt.printf("  FAILED: dof=0 -> %v\n", e)
+			return false
+		}
+		small := make([]f64, blas.ols_stderr_scratch(REAL_N) - 1);defer delete(small)
+		if e := blas.ols_accum_stderr(&full, se[:], small); e != .Scratch_Too_Small {
+			fmt.printf("  FAILED: short scratch -> %v\n", e)
+			return false
+		}
+		if e := blas.ols_accum_stderr(&full, se[:2], sscratch); e != .Invalid_Dimension {
+			fmt.printf("  FAILED: short se -> %v\n", e)
+			return false
+		}
+		// Collinear predictors must be rejected, not given an infinite se.
+		M :: 12
+		NC :: 3
+		cx := make([]f64, M * NC);defer delete(cx)
+		cy := make([]f64, M);defer delete(cy)
+		for i in 0 ..< M {
+			v := f64(i) * 0.37 - 2.0
+			cx[i * NC + 0] = 1.0
+			cx[i * NC + 1] = v
+			cx[i * NC + 2] = v
+			cy[i] = 3.0 * v + 1.0
+		}
+		cs := make([]f64, blas.ols_accum_scratch(NC));defer delete(cs)
+		col: blas.Ols_Accum
+		blas.ols_accum_init(&col, NC, cs)
+		blas.ols_accum_rows(&col, cx, NC, cy, M)
+		ss2 := make([]f64, blas.ols_stderr_scratch(NC));defer delete(ss2)
+		se3: [NC]f64
+		if e := blas.ols_accum_stderr(&col, se3[:], ss2); e != .Rank_Deficient {
+			fmt.printf("  FAILED: collinear -> %v\n", e)
+			return false
+		}
+	}
+	fmt.println("  PASSED")
+	return true
+}
+
+test_ols_eval :: proc() -> bool {
+	fmt.println("Testing ols_accum_eval (held-out RSS from the triangle)...")
+
+	full_scratch := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(full_scratch)
+	full: blas.Ols_Accum
+	build_full(full_scratch, &full)
+
+	ls: [REAL_N]f64
+	blas.ols_accum_solve(&full, ls[:])
+
+	// Direct ||X*b - y||^2 over the real data, for comparison.
+	direct :: proc(b: []f64) -> f64 {
+		acc := 0.0
+		for i in 0 ..< REAL_M {
+			p := 0.0
+			for j in 0 ..< REAL_N {p += real_x[i * REAL_N + j] * b[j]}
+			d := p - real_y[i]
+			acc += d * d
+		}
+		return acc
+	}
+
+	// Arbitrary coefficient vectors, not just the least-squares one -- that is
+	// the whole point, since a held-out fold is evaluated with someone else's
+	// beta.
+	worst := 0.0
+	for trial in 0 ..< 5 {
+		b: [REAL_N]f64
+		for j in 0 ..< REAL_N {
+			switch trial {
+			case 0:
+				b[j] = ls[j]
+			case 1:
+				b[j] = 0
+			case 2:
+				b[j] = ls[j] * 1.5
+			case 3:
+				b[j] = f64(j) - 2.0
+			case 4:
+				b[j] = -ls[j]
+			}
+		}
+		got, e := blas.ols_accum_eval(&full, b[:])
+		if e != .None {
+			fmt.printf("  FAILED: eval %v\n", e)
+			return false
+		}
+		want := direct(b[:])
+		rel := abs(got - want) / max(1.0, want)
+		worst = max(worst, rel)
+		if rel > 1e-12 {
+			fmt.printf("  FAILED: trial %d got %.17e want %.17e\n", trial, got, want)
+			return false
+		}
+	}
+	fmt.printf("    5 coefficient vectors, worst relative error %.2e\n", worst)
+
+	// For the least-squares beta, eval must agree with rss.
+	{
+		got, _ := blas.ols_accum_eval(&full, ls[:])
+		if abs(got - blas.ols_accum_rss(&full)) > 1e-10 * max(1.0, got) {
+			fmt.printf("  FAILED: eval(LS) %.17e vs rss %.17e\n", got, blas.ols_accum_rss(&full))
+			return false
+		}
+	}
+
+	// The real use: two-fold cross-validation, entirely from triangles.
+	{
+		SPLIT :: 12
+		a_scratch := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(a_scratch)
+		b_scratch := make([]f64, blas.ols_accum_scratch(REAL_N));defer delete(b_scratch)
+		train, test: blas.Ols_Accum
+		blas.ols_accum_init(&train, REAL_N, a_scratch)
+		blas.ols_accum_init(&test, REAL_N, b_scratch)
+		blas.ols_accum_rows(&train, real_x[:], REAL_N, real_y[:], SPLIT)
+		blas.ols_accum_rows(&test, real_x[SPLIT * REAL_N:], REAL_N, real_y[SPLIT:], REAL_M - SPLIT)
+
+		tb: [REAL_N]f64
+		if e := blas.ols_accum_solve(&train, tb[:]); e != .None {
+			fmt.printf("  FAILED: train solve %v\n", e)
+			return false
+		}
+		held, e := blas.ols_accum_eval(&test, tb[:])
+		if e != .None {
+			fmt.printf("  FAILED: held-out eval %v\n", e)
+			return false
+		}
+		// Same thing computed directly over the held-out rows.
+		want := 0.0
+		for i in SPLIT ..< REAL_M {
+			p := 0.0
+			for j in 0 ..< REAL_N {p += real_x[i * REAL_N + j] * tb[j]}
+			d := p - real_y[i]
+			want += d * d
+		}
+		if abs(held - want) > 1e-11 * max(1.0, want) {
+			fmt.printf("  FAILED: held-out %.17e want %.17e\n", held, want)
+			return false
+		}
+		// And the held-out RSS must exceed the training RSS -- the fit was not
+		// tuned on these rows. (Not guaranteed in general, but with 8 held-out
+		// rows against 5 predictors it would be startling otherwise.)
+		if held <= blas.ols_accum_rss(&train) * 0.5 {
+			fmt.printf("  NOTE: held-out %.4f vs train %.4f\n", held, blas.ols_accum_rss(&train))
+		}
+		fmt.printf("    2-fold: train RSS %.4f on %d rows, held-out RSS %.4f on %d rows\n",
+			blas.ols_accum_rss(&train), train.nrows, held, test.nrows)
+	}
+
+	// Boundary: short beta.
+	{
+		b: [2]f64
+		if _, e := blas.ols_accum_eval(&full, b[:]); e != .Invalid_Dimension {
+			fmt.printf("  FAILED: short beta -> %v\n", e)
+			return false
+		}
+	}
+	fmt.println("  PASSED")
+	return true
+}

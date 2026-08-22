@@ -199,7 +199,11 @@ signature spanning a 500,000x cost range, with nothing at the call site
 indicating which you get, would make a frame budget unpredictable. Callers pick
 the path; the cost table in `lstsq.odin` says which one applies.
 
-**No model selection.** These are mechanisms, not policy. The library reports
+**No model selection, but now enough information to make one.** `ols_accum_stderr`
+gives the spread of each coefficient and `ols_accum_eval` gives held-out RSS for
+any beta from a triangle alone, so a caller can tell a real term from a spurious
+one and can cross-validate without keeping the test rows. Both report numbers;
+neither ranks. These are mechanisms, not policy. The library reports
 `beta` and `RSS` for whatever model is asked for and never ranks, scores, or
 searches — finding the right model is the user's job, and a criterion like AIC
 or BIC is caller arithmetic over `(rss, nrows, k)`, all of which are already

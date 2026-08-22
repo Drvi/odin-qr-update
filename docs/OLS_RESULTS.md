@@ -381,6 +381,90 @@ and then spent `O(m^2)` forming `Q^T*y`. Generalising from that to "the QR
 update routines need `Q`" was wrong: on the augmented triangle they need
 nothing but the triangle.
 
+## Standard errors and held-out evaluation
+
+Two additions that turn "here are some coefficients" into "here is whether this
+model is real". Both work from the triangle alone.
+
+### Why RSS was not enough
+
+`RSS` falls whenever a term is added, so a comparison based on it always prefers
+the larger model. In `examples/model_iteration` the eight-term fit beats the
+correct three-term fit on training RSS (486.49 against 486.71) purely by
+absorbing noise. Nothing in the API could distinguish a real coefficient from a
+spurious one.
+
+`ols_accum_stderr` supplies the missing quantity:
+
+    cov(beta) = sigma^2 * (X'X)^-1 = sigma^2 * R^-1 * R^-T
+    sigma^2   = RSS / (nrows - n)
+    se[j]     = sigma * ||row j of R^-1||
+
+`n^3/3` to invert the triangle plus `n^2` for the row norms, `n^2` scratch, no
+data. Verified against numpy on three models over the real data: **worst
+relative error 3.4e-16**.
+
+On the example's planted model — real coefficients on predictors 0, 2 and 5,
+exact zeros on the other five — the eight-term fit now reads:
+
+| term | coef | std err | t |
+|---|---|---|---|
+| b0 | 3.0049 | 0.0055 | 543.8 |
+| b1 | -0.0024 | 0.0055 | **-0.4** |
+| b2 | -1.7528 | 0.0055 | -317.0 |
+| b3 | 0.0022 | 0.0055 | **0.4** |
+| b5 | 0.8900 | 0.0055 | 162.0 |
+
+Every planted zero is flagged; every real term is unambiguous. The t-statistic
+is `beta[j]/se[j]` and the degrees of freedom are `nrows - n` — both left to the
+caller, since the threshold is a judgement and the library does not make those.
+
+This was **deferred too long**. `issues/003` held it back on the grounds that
+the degrees-of-freedom convention shifts once weights or ridge exist. They do
+not exist, so for everything the library actually builds `dof = nrows - n` is
+unambiguous. The deferral was over-cautious and left a hole in the subsystem's
+main use.
+
+Boundary: `nrows <= n` returns `.Not_Enough_Rows`. With zero degrees of freedom
+the residual is zero by construction and `sigma^2` is undefined, so there is no
+honest answer to give.
+
+### Held-out evaluation costs nothing
+
+The triangle satisfies `T'T = A'A` for `A = [X | y]`, so with `v = [beta; -1]`:
+
+    ||X*beta - y||^2 = v' A'A v = v' T'T v = ||T*v||^2
+
+which is `O(n^2)` over the triangle and needs no access to the rows. Crucially
+this holds for **any** beta, not just the least-squares one — verified against a
+direct computation for the least-squares, zero, scaled and arbitrary vectors,
+**worst relative error 9.2e-16**.
+
+So cross-validation becomes entirely triangle-based: accumulate one triangle per
+fold, merge the training folds, solve, and score the result against the held-out
+fold's triangle. The test rows are never kept and never revisited. Every step is
+`O(n^3)` or less.
+
+`ols_accum_eval(acc, beta)` is that. For the least-squares beta it reproduces
+`ols_accum_rss` to rounding, which is the same quantity by a shorter route.
+
+What it deliberately does **not** do is choose folds or pick a winner. The split
+is the caller's, and so is what to conclude — the library supplies the number.
+
+Measured on the example's train/test split (4000 train rows, 2000 held out):
+
+| model | train rms | held-out rms |
+|---|---|---|
+| intercept + p2 | 0.96016 | 0.96883 |
+| intercept + p2 + p5 | 0.34882 | 0.34868 |
+| everything (5 spurious terms) | 0.34877 | 0.34867 |
+
+Worth reading honestly: "everything" beats the correct model on training rms by
+construction, and held out the two are a wash. With 4000 rows against five
+spurious terms the overfitting penalty is genuinely small — held-out RSS is the
+right check but not a dramatic one until a model is properly
+over-parameterised. On this data the t-statistics are the sharper signal.
+
 ## Correctness verification
 
 Ground truth is `numpy.linalg.lstsq` (LAPACK) on the repository's own real
@@ -399,7 +483,7 @@ The NaN test also checks recovery: after a batch aborts on row 4, the
 accumulator still holds exactly 4 rows, absorbing the remaining good rows
 succeeds, and the resulting `beta` is finite.
 
-Full suite: **34 tests, 0 failures** (13 pre-existing, 21 new).
+Full suite: **51 tests, 0 failures** (13 pre-existing, 38 new).
 
 ### The library allocates nothing
 

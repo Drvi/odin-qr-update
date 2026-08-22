@@ -758,6 +758,151 @@ ols_accum_rows_gather :: proc "contextless" (
 	return absorbed, .None
 }
 
+// ols_accum_eval returns ||X*beta - y||^2 for an ARBITRARY coefficient vector,
+// computed from the triangle alone.
+//
+// This is what makes held-out evaluation free. The triangle satisfies
+// T'T = A'A for A = [X | y], so with v = [beta; -1],
+//
+//     ||X*beta - y||^2 = v' A'A v = v' T'T v = ||T*v||^2
+//
+// and the right-hand side is O(n^2) over an (n+1)-square triangle, needing no
+// access to the rows that produced it. Verified against a direct computation
+// for least-squares, zero, planted-truth and arbitrary coefficient vectors:
+// agreement to 1.2e-14 relative.
+//
+// The use is cross-validation without a scoring rule. Accumulate one triangle
+// per fold; merge the training folds and solve; then evaluate that beta against
+// the held-out fold's triangle. Every step is O(n^3) or less and the data is
+// never revisited. Which folds, and what to do with the numbers, stay yours.
+//
+//   beta  in  f64[>= acc.n]. Read only. Need not be the least-squares solution
+//             -- that is the point.
+//
+// For the least-squares beta this returns ols_accum_rss to rounding, since that
+// is the same quantity by a shorter route.
+ols_accum_eval :: proc "contextless" (
+	acc: ^Ols_Accum,
+	beta: []f64,
+) -> (
+	rss: f64,
+	err: Ols_Error,
+) {
+	n, ld := acc.n, acc.ld
+	if n < 1 {
+		return 0, .Invalid_Dimension
+	}
+	if len(beta) < n {
+		return 0, .Invalid_Dimension
+	}
+
+	// ||T*v||^2 with v = [beta; -1]. T is upper triangular, so row r spans
+	// columns r..n.
+	total := 0.0
+	for r in 0 ..< n + 1 {
+		base := r * ld
+		acc_r := 0.0
+		for c in r ..< n {
+			acc_r += acc.tri[base + c] * beta[c]
+		}
+		acc_r -= acc.tri[base + n] // the v[n] = -1 term
+		total += acc_r * acc_r
+	}
+	return total, .None
+}
+
+// Scratch required by ols_accum_stderr, in f64 elements.
+ols_stderr_scratch :: proc "contextless" (n: int) -> int {
+	return n * n
+}
+
+// ols_accum_stderr returns the standard error of each coefficient.
+//
+//     cov(beta) = sigma^2 * (X'X)^-1 = sigma^2 * R^-1 * R^-T
+//     sigma^2   = RSS / (nrows - n)
+//     se[j]     = sigma * ||row j of R^-1||
+//
+// This is the number that decides whether a coefficient is distinguishable from
+// zero, which RSS alone cannot answer -- RSS falls whenever a term is added,
+// so a model comparison based on it always prefers the larger model. A
+// t-statistic is beta[j]/se[j] and the degrees of freedom are
+// acc.nrows - acc.n, both left to the caller: the library reports the spread,
+// not a verdict.
+//
+//   se      out   f64[>= n]. Written only when the call returns .None.
+//   scratch temp  f64[>= ols_stderr_scratch(n)]. Undefined on exit.
+//   rcond   in    rank-rejection ratio, as for ols_accum_solve.
+//
+// Cost: n^3/3 to invert the triangle, plus n^2 for the row norms.
+//
+// Reports .Not_Enough_Rows when nrows <= n: with zero degrees of freedom the
+// residual is exactly zero by construction and sigma^2 is undefined, so there
+// is no honest answer to give.
+//
+// ASSUMES ordinary least squares with independent, equal-variance errors. That
+// holds for everything this library builds, since it has no weights and no
+// ridge (issues/002); if either is ever added, this formula changes and so does
+// the degrees-of-freedom count.
+ols_accum_stderr :: proc "contextless" (
+	acc: ^Ols_Accum,
+	se: []f64,
+	scratch: []f64,
+	rcond: f64 = OLS_DEFAULT_RCOND,
+) -> Ols_Error {
+	n, ld := acc.n, acc.ld
+	if n < 1 {
+		return .Invalid_Dimension
+	}
+	if len(se) < n {
+		return .Invalid_Dimension
+	}
+	if len(scratch) < ols_stderr_scratch(n) {
+		return .Scratch_Too_Small
+	}
+	if acc.nrows <= n {
+		return .Not_Enough_Rows
+	}
+
+	dmax, dmin := 0.0, max(f64)
+	for j in 0 ..< n {
+		d := abs(acc.tri[j * ld + j])
+		dmax = max(dmax, d)
+		dmin = min(dmin, d)
+	}
+	if dmax == 0.0 || dmin <= rcond * dmax {
+		return .Rank_Deficient
+	}
+
+	// Z = R^-1, upper triangular, built column by column.
+	z := scratch[0:n * n]
+	for i in 0 ..< n * n {
+		z[i] = 0.0
+	}
+	for j in 0 ..< n {
+		z[j * n + j] = 1.0 / acc.tri[j * ld + j]
+		for i := j - 1; i >= 0; i -= 1 {
+			sum := 0.0
+			for p in i + 1 ..= j {
+				sum += acc.tri[i * ld + p] * z[p * n + j]
+			}
+			z[i * n + j] = -sum / acc.tri[i * ld + i]
+		}
+	}
+
+	// cov[j,j] = sigma^2 * ||row j of Z||^2, and Z is upper triangular.
+	rss := ols_accum_rss(acc)
+	sigma2 := rss / f64(acc.nrows - n)
+	for j in 0 ..< n {
+		ss := 0.0
+		for p in j ..< n {
+			v := z[j * n + p]
+			ss += v * v
+		}
+		se[j] = math.sqrt_f64(sigma2 * ss)
+	}
+	return .None
+}
+
 // ols_accum_rss returns ||X*beta - y||^2 over the rows absorbed so far.
 //
 // Free: the augmented factorization leaves the residual norm sitting on

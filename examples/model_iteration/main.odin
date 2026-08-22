@@ -76,8 +76,9 @@ Hypothesis :: struct {
 }
 
 // try evaluates one hypothesis against the cached fit and prints what came
-// back. It does not judge, rank, or recommend.
-try :: proc(h: Hypothesis, full: ^blas.Ols_Accum, scratch: []f64) {
+// back. It does not judge, rank, or recommend -- but it now reports the spread
+// as well as the estimate, which is what makes a verdict possible at all.
+try :: proc(h: Hypothesis, full: ^blas.Ols_Accum, scratch: []f64, se_scratch: []f64) {
 	k := len(h.keep)
 
 	sub: blas.Ols_Accum
@@ -102,11 +103,28 @@ try :: proc(h: Hypothesis, full: ^blas.Ols_Accum, scratch: []f64) {
 	fmt.printf("  %s\n", h.name)
 	fmt.printf("    predictors %v,  k = %d\n", h.keep, k)
 	fmt.printf("    RSS %.4f   residual rms %.5f\n", rss, math.sqrt_f64(rss / f64(sub.nrows)))
-	fmt.printf("    coefficients")
-	for j in 0 ..< k {
-		fmt.printf("  b%d=%.4f", h.keep[j], beta[j])
+
+	// Standard errors turn "the coefficient is 0.0024" into "the coefficient
+	// is indistinguishable from zero". RSS alone cannot say that -- it falls
+	// whenever a term is added, so it always prefers the bigger model.
+	se: [P]f64
+	if e := blas.ols_accum_stderr(&sub, se[:k], se_scratch); e != .None {
+		fmt.printf("    standard errors unavailable: %v\n", e)
+		return
 	}
-	fmt.println()
+	// Widths are avoided: numeric width specifiers zero-pad in this Odin
+	// version, and fmt.tprintf is unavailable under the panic allocator, so
+	// ragged output beats misleading output.
+	for j in 0 ..< k {
+		t := beta[j] / se[j]
+		// |t| > 2 is the usual rough bar. The threshold is the caller's, and
+		// the degrees of freedom are sub.nrows - k if a real test is wanted.
+		fmt.printf("      b%d: coef %.4f  se %.4f  t %.1f", h.keep[j], beta[j], se[j], t)
+		if abs(t) <= 2.0 {
+			fmt.printf("   <- indistinguishable from 0")
+		}
+		fmt.println()
+	}
 }
 
 main :: proc() {
@@ -138,6 +156,7 @@ main :: proc() {
 	full_buf: [(P + 1) * (P + 1) + (P + 1)]f64
 	sub_buf: [(P + 1) * (P + 1) + (P + 1)]f64
 	batch_buf: [(P + 1) * (P + 1) + (P + 1)]f64
+	se_buf: [P * P]f64
 
 	fmt.println("=== Trying models by hand ===")
 	fmt.printf(
@@ -177,7 +196,7 @@ main :: proc() {
 		{"drop the intercept", {2, 5}},
 		{"p2 twice (a mistake)", {2, 2}},
 	}) {
-		try(h, &full, sub_buf[:])
+		try(h, &full, sub_buf[:], se_buf[:])
 	}
 
 	// New data arrives, collected separately. Fold it in without going back to
@@ -196,7 +215,7 @@ main :: proc() {
 	}
 	fmt.printf("merged; now %d rows, still %d bytes of state\n\n", full.nrows, len(full_buf) * 8)
 
-	try(Hypothesis{"intercept + p2 + p5, refitted", {0, 2, 5}}, &full, sub_buf[:])
+	try(Hypothesis{"intercept + p2 + p5, refitted", {0, 2, 5}}, &full, sub_buf[:], se_buf[:])
 
 	// A hypothesis the cached triangle CANNOT answer: a derived predictor that
 	// was never accumulated. Adding a column needs its inner products against
@@ -238,6 +257,57 @@ main :: proc() {
 	}
 	fmt.println()
 	fmt.println("    (the interaction term is noise here, so it buys nothing)")
+
+	// ---- held-out evaluation, entirely from triangles ----
+	//
+	// RSS on the data you fitted always falls as terms are added, so it cannot
+	// tell you when to stop. Held-out RSS can. ols_accum_eval computes
+	// ||X*beta - y||^2 for ANY beta from a triangle alone, so the test fold
+	// never has to be kept: accumulate it once, then score whatever model the
+	// training fold produced.
+	fmt.println()
+	fmt.println("--- train on batch 1, score on batch 2 (held out, never fitted) ---")
+	tr_buf: [(P + 1) * (P + 1) + (P + 1)]f64
+	te_buf: [(P + 1) * (P + 1) + (P + 1)]f64
+	tr_sub: [(P + 1) * (P + 1) + (P + 1)]f64
+	te_sub: [(P + 1) * (P + 1) + (P + 1)]f64
+	train, test: blas.Ols_Accum
+	blas.ols_accum_init(&train, P, tr_buf[:])
+	blas.ols_accum_init(&test, P, te_buf[:])
+	blas.ols_accum_rows(&train, x0[:], P, y0[:], M0)
+	blas.ols_accum_rows(&test, x1[:], P, y1[:], M1)
+
+	fmt.println("    model / train rms / held-out rms")
+	for h in ([]Hypothesis {
+		{"intercept + p2", {0, 2}},
+		{"intercept + p2 + p5", {0, 2, 5}},
+		{"everything", {0, 1, 2, 3, 4, 5, 6, 7}},
+	}) {
+		k := len(h.keep)
+		ts, es: blas.Ols_Accum
+		blas.ols_accum_init(&ts, k, tr_sub[:])
+		blas.ols_accum_init(&es, k, te_sub[:])
+		if blas.ols_accum_select(&ts, &train, h.keep) != .None {continue}
+		if blas.ols_accum_select(&es, &test, h.keep) != .None {continue}
+		b: [P]f64
+		if blas.ols_accum_solve(&ts, b[:k]) != .None {continue}
+		held, e := blas.ols_accum_eval(&es, b[:k])
+		if e != .None {continue}
+		fmt.printf(
+			"      %s: train %.5f  held-out %.5f\n",
+			h.name,
+			math.sqrt_f64(blas.ols_accum_rss(&ts) / f64(ts.nrows)),
+			math.sqrt_f64(held / f64(es.nrows)),
+		)
+	}
+	fmt.println()
+	fmt.println("    Train rms can only fall as terms are added -- \"everything\" beats the")
+	fmt.println("    3-term model on train by construction. Held out, the five pure-noise")
+	fmt.println("    terms buy nothing: the two models are a wash. With 4000 rows against")
+	fmt.println("    5 spurious terms the penalty is small, which is itself worth seeing --")
+	fmt.println("    held-out RSS is the honest check, but it is not a dramatic one until")
+	fmt.println("    the model is genuinely over-parameterised. The t-statistics above are")
+	fmt.println("    the sharper signal here.")
 
 	fmt.println()
 	fmt.println("For reference, the coefficients the data was generated from:")

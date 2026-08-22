@@ -1,17 +1,25 @@
 # 003 — Covariance, standard errors, R-squared
 
-`cov(beta) = sigma^2 * R^-1 * R^-T` with `sigma^2 = RSS / (nrows - n)`.
-Requires inverting the `n x n` triangle: `n^2` caller-supplied scratch and
-`n^3/3` work. No allocation would be needed; it would follow the same
-`*_scratch` convention as everything else.
+**Standard errors: DONE.** `ols_accum_stderr` returns
+`se[j] = sigma * ||row j of R^-1||` with `sigma^2 = RSS/(nrows - n)`, at
+`n^3/3 + n^2` and `n^2` caller-supplied scratch. Verified against numpy to
+3.4e-16 on three models over the real data.
 
-Not implemented. `beta` and `RSS` are what was asked for, and both are already
-exposed. Anything built on top of them — standard errors, R-squared, AIC, BIC,
-adjusted R-squared — is caller arithmetic over `(rss, nrows, k)`.
+This was deferred here originally, on the grounds that the degrees-of-freedom
+convention shifts once weights or ridge exist. That was over-cautious: they do
+not exist, so `dof = nrows - n` is unambiguous for everything the library
+builds, and without standard errors there was no way to tell a real coefficient
+from a spurious one -- which is the subsystem's main use. If weights or ridge
+are ever added (issue 002), this formula and the dof count both change, and the
+procedure documents that assumption.
 
-That is deliberate rather than lazy: **choosing the model is the user's job**,
-so the library does not ship a scoring rule. Providing one would mean picking a
-degrees-of-freedom convention on the user's behalf, and that choice changes
-again the moment weights or ridge rows appear (issue 002). Covariance proper
-has no such ambiguity and could be added if a caller needs it; a built-in
-"which model is best" must not be.
+Still not provided, and still deliberately:
+
+- **The full covariance matrix.** `ols_accum_stderr` computes `R^-1` internally
+  and takes row norms; returning the whole `sigma^2 * R^-1 * R^-T` would cost
+  an extra `n^3/2` and `n^2` of output. Worth adding for testing linear
+  combinations of coefficients or joint confidence regions; nobody has asked.
+- **R-squared, adjusted R-squared, AIC, BIC, p-values.** All are arithmetic over
+  `(rss, nrows, n)` and the t-statistics, every one of which is now exposed.
+  These are scoring rules, and choosing the model is the user\'s job -- the
+  library reports the spread, not a verdict.
